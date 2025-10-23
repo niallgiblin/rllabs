@@ -1,0 +1,13 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.pyc
+
+# Cache
+.pytest_cache/
+
+# Logs
+*.log
+
+# VSCode workspace
+.vscode/
+rllabs.code-workspace

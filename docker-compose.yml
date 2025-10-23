@@ -1,0 +1,101 @@
+networks:
+  rllabs_net:
+    driver: bridge
+
+services:
+  # PostgreSQL Database for Model Catalog Service (Metadata)
+  postgres:
+    image: postgres:13
+    container_name: postgres_db
+    environment:
+      POSTGRES_USER: rllabs
+      POSTGRES_PASSWORD: rllabs_password
+      POSTGRES_DB: model_catalog_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - rllabs_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rllabs -d model_catalog_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis for Catalog Caching
+  redis:
+    image: redis:6.2-alpine
+    container_name: redis_cache
+    ports:
+      - "6379:6379"
+    networks:
+      - rllabs_net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # MinIO for S3-compatible Object Storage (Model Files)
+  minio:
+    image: minio/minio:latest
+    container_name: minio_storage
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin_password
+    ports:
+      - "9000:9000" # API port
+      - "9001:9001" # Console port
+    volumes:
+      - minio_data:/data
+    networks:
+      - rllabs_net
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # A one-off service to create the MinIO bucket
+  create-buckets:
+    image: minio/mc
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks:
+      - rllabs_net
+    entrypoint: >
+      /bin/sh -c "
+      /usr/bin/mc alias set rllabs_minio http://minio:9000 minioadmin minioadmin_password;
+      /usr/bin/mc mb rllabs_minio/models;
+      /usr/bin/mc policy set public rllabs_minio/models;
+      exit 0;
+      "
+
+  # Model Catalog Service (AP System)
+  model_catalog_service:
+    build:
+      context: ./model_catalog_service
+    container_name: model_catalog_service
+    ports:
+      - "8001:8000"
+    environment:
+      - DATABASE_URL=postgresql://rllabs:rllabs_password@postgres/model_catalog_db
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - rllabs_net
+    volumes:
+      - ./model_catalog_service:/app
+      - ./shared:/app/shared
+
+volumes:
+  postgres_data:
+  minio_data:
