@@ -1,8 +1,41 @@
-networks:
-  rllabs_net:
-    driver: bridge
-
 services:
+  # API Gateway
+  api-gateway:
+    build: ./api_gateway
+    ports:
+      - "8080:8080"
+    environment:
+      SECRET_KEY: ${JWT_SECRET_KEY:-change-me-in-production}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    depends_on:
+      - redis
+      - model_catalog_service
+    networks:
+      - rllabs-network
+
+  # Model Catalog Service (AP System)
+  model_catalog_service:
+    build:
+      context: ./model_catalog_service
+    container_name: model_catalog_service
+    # The gateway will expose this service, so no need to publish the port directly
+    # ports:
+    #   - "8001:8000"
+    environment:
+      - DATABASE_URL=postgresql://rllabs:rllabs_password@postgres/model_catalog_db
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - rllabs-network
+    volumes:
+      - ./model_catalog_service:/app
+
   # PostgreSQL Database for Model Catalog Service (Metadata)
   postgres:
     image: postgres:13
@@ -16,21 +49,21 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     networks:
-      - rllabs_net
+      - rllabs-network
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U rllabs -d model_catalog_db"]
       interval: 10s
       timeout: 5s
       retries: 5
 
-  # Redis for Catalog Caching
+  # Redis for Caching and Rate Limiting
   redis:
-    image: redis:6.2-alpine
+    image: redis:7-alpine
     container_name: redis_cache
     ports:
       - "6379:6379"
     networks:
-      - rllabs_net
+      - rllabs-network
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -50,7 +83,7 @@ services:
     volumes:
       - minio_data:/data
     networks:
-      - rllabs_net
+      - rllabs-network
     command: server /data --console-address ":9001"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
@@ -65,7 +98,7 @@ services:
       minio:
         condition: service_healthy
     networks:
-      - rllabs_net
+      - rllabs-network
     entrypoint: >
       /bin/sh -c "
       /usr/bin/mc alias set rllabs_minio http://minio:9000 minioadmin minioadmin_password;
@@ -74,27 +107,9 @@ services:
       exit 0;
       "
 
-  # Model Catalog Service (AP System)
-  model_catalog_service:
-    build:
-      context: ./model_catalog_service
-    container_name: model_catalog_service
-    ports:
-      - "8001:8000"
-    environment:
-      - DATABASE_URL=postgresql://rllabs:rllabs_password@postgres/model_catalog_db
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    networks:
-      - rllabs_net
-    volumes:
-      - ./model_catalog_service:/app
-      - ./shared:/app/shared
+networks:
+  rllabs-network:
+    driver: bridge
 
 volumes:
   postgres_data:

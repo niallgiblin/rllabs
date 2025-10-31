@@ -11,3 +11,5 @@ __pycache__/
 # VSCode workspace
 .vscode/
 rllabs.code-workspace
+
+.DS_STORE

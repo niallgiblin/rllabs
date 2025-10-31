@@ -1,0 +1,19 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: create-buckets
+spec:
+  template:
+    spec:
+      containers:
+      - name: mc
+        image: minio/mc
+        command:
+        - /bin/sh
+        - -c
+        - >
+          /usr/bin/mc alias set rllabs_minio http://minio:9000 minioadmin minioadmin_password;
+          /usr/bin/mc mb rllabs_minio/models;
+          /usr/bin/mc policy set public rllabs_minio/models;
+          exit 0;
+      restartPolicy: OnFailure

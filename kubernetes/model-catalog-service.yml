@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: model-catalog-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: model-catalog-service
+  template:
+    metadata:
+      labels:
+        app: model-catalog-service
+    spec:
+      containers:
+        - name: model-catalog-service
+          image: model-catalog-service
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          env:
+            - name: DATABASE_URL
+              value: "postgresql://rllabs:rllabs_password@postgres/model_catalog_db"
+            - name: REDIS_HOST
+              value: "redis"
+            - name: REDIS_PORT
+              value: "6379"
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: model-catalog-service
+spec:
+  selector:
+    app: model-catalog-service
+  ports:
+    - protocol: TCP
+      port: 8000
+      targetPort: 8000
