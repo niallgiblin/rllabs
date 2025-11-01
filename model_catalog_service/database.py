@@ -22,6 +22,7 @@ class Model(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, unique=True, index=True)
     description = Column(String)
+    created_by = Column(String, index=True) # User ID from the API Gateway
     created_at = Column(DateTime, default=datetime.now(timezone.utc))
 
     versions = relationship("ModelVersion", back_populates="model")
@@ -44,7 +45,7 @@ class ModelVersion(Base):
 
 def get_db():
     """
-    Dependency to get a DB session for a request.
+    To get a DB session for a request.
     """
     db = SessionLocal()
     try:
@@ -54,8 +55,8 @@ def get_db():
 
 def create_db_and_tables():
     """
-    A function to create the database tables. 
-    Called on application startup.
+    Creates the database tables. 
+    Called on startup.
     """
     try:
         Base.metadata.create_all(bind=engine)

@@ -1,3 +1,5 @@
 pytest
 requests
 redis
+PyJWT
+pika

@@ -1,0 +1,12 @@
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+httpx==0.25.1
+passlib[bcrypt]==1.7.4
+redis==5.0.1
+pydantic==2.5.0
+pydantic-settings==2.1.0
+python-multipart==0.0.6
+PyJWT==2.8.0
+requests
+Authlib==1.2.1
+circuitbreaker==2.0.0

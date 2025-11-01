@@ -19,17 +19,23 @@ services:
     build:
       context: ./model_catalog_service
     container_name: model_catalog_service
-    # The gateway will expose this service, so no need to publish the port directly
-    # ports:
-    #   - "8001:8000"
+    # Expose for local tests hitting localhost:8001
+    ports:
+      - "8001:8000"
     environment:
       - DATABASE_URL=postgresql://rllabs:rllabs_password@postgres/model_catalog_db
       - REDIS_HOST=redis
       - REDIS_PORT=6379
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_PORT=5672
+      - RABBITMQ_USER=admin
+      - RABBITMQ_PASS=admin_password
     depends_on:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      rabbitmq:
         condition: service_healthy
     networks:
       - rllabs-network
@@ -70,6 +76,24 @@ services:
       timeout: 5s
       retries: 5
 
+  # RabbitMQ for Asynchronous Messaging
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: rabbitmq_messaging
+    environment:
+      RABBITMQ_DEFAULT_USER: admin
+      RABBITMQ_DEFAULT_PASS: admin_password
+    ports:
+      - "5672:5672"   # AMQP port
+      - "15672:15672" # Management UI
+    networks:
+      - rllabs-network
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   # MinIO for S3-compatible Object Storage (Model Files)
   minio:
     image: minio/minio:latest
@@ -85,6 +109,9 @@ services:
     networks:
       - rllabs-network
     command: server /data --console-address ":9001"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 10s
