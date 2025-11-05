@@ -54,10 +54,9 @@ except ImportError:
     def get_target_service(path: str) -> Optional[str]:
         # Simple routing logic
         if path.startswith("/api/models"):
-            return "model-service"
-        elif path.startswith("/api/data"):
-            return "data-service"
-        return None
+            return "http://model_catalog_service:8000" 
+        elif path.startswith("/api/uploads") or path.startswith("/api/downloads"):
+            return "http://upload_download_service:8002" 
 
 # Placeholder for internal router if no mtls
 internal_router = APIRouter()
