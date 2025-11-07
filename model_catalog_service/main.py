@@ -4,6 +4,9 @@ from sqlalchemy import text, desc
 from sqlalchemy.exc import IntegrityError
 from typing import List, Optional
 from contextlib import asynccontextmanager
+import logging
+
+logger = logging.getLogger(__name__)
 
 import database
 from pydantic import BaseModel
@@ -15,6 +18,15 @@ try:
 except ImportError:
     EVENT_PUBLISHING_ENABLED = False
     def get_event_publisher():
+        return None
+
+# Try to import event consumer, but fail gracefully if RabbitMQ unavailable
+try:
+    from event_consumer import get_event_consumer
+    EVENT_CONSUMING_ENABLED = True
+except ImportError:
+    EVENT_CONSUMING_ENABLED = False
+    def get_event_consumer():
         return None
 
 # Pydantic models for request/response validation
@@ -49,12 +61,32 @@ class Model(ModelBase):
 class LatestModelPath(BaseModel):
     storage_path: str
 
-# FastAPI app
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Create DB tables on startup
     database.create_db_and_tables()
+    
+    # Start event consumer if enabled
+    if EVENT_CONSUMING_ENABLED:
+        try:
+            consumer = get_event_consumer()
+            if consumer:
+                consumer.start_consuming()
+                print("Event consumer started for ArtifactCommitted events")
+        except Exception as e:
+            print(f"Failed to start event consumer: {e}")
+    
     yield
+    
+    # Stop event consumer on shutdown
+    if EVENT_CONSUMING_ENABLED:
+        try:
+            consumer = get_event_consumer()
+            if consumer:
+                consumer.stop_consuming()
+                print("Event consumer stopped")
+        except Exception as e:
+            print(f"Error stopping event consumer: {e}")
 
 app = FastAPI(
     title="Model Catalog Service",
@@ -174,3 +206,129 @@ async def get_latest_model_path(model_id: int, db: Session = Depends(database.ge
         if isinstance(e, HTTPException):
             raise e
         raise HTTPException(status_code=503, detail=f"Database is unavailable: {e}")
+
+@app.get("/models/{model_id}/ownership", tags=["Models"])
+async def check_model_ownership(
+    model_id: int,
+    user_id: str = Header(..., alias="X-User-Id"),
+    db: Session = Depends(database.get_db)
+):
+    """
+    Check if a user owns or has access to a model.
+    
+    Used by Upload/Download Service for RBAC authorisation.
+    This endpoint allows other services to check model-level permissions
+    before granting access to artifacts.
+    
+    Returns:
+        {
+            "has_access": bool,      # True if user can access the model
+            "is_owner": bool,         # True if user created the model
+            "model_id": int           # The model ID
+        }
+    """
+    db_model = db.query(database.Model).filter(database.Model.id == model_id).first()
+    
+    if not db_model:
+        raise HTTPException(status_code=404, detail="Model not found")
+    
+    is_owner = db_model.created_by == user_id
+    has_access = is_owner
+    
+    return {
+        "has_access": has_access,
+        "is_owner": is_owner,
+        "model_id": model_id
+    }
+
+# Admin utilities
+def is_admin(user_scopes: Optional[str] = None, is_admin_header: Optional[str] = None) -> bool:
+    """
+    Check if user has admin privileges.
+    
+    Prefers X-Is-Admin header (from API Gateway) for centralized admin checking.
+    Falls back to parsing X-Scope header if X-Is-Admin not provided.
+    
+    Args:
+        user_scopes: Space-separated scopes from X-Scope header (e.g., "api:read api:write api:admin")
+        is_admin_header: X-Is-Admin header value from API Gateway ("true" or "false")
+    
+    Returns:
+        True if user has admin scope, False otherwise
+    """
+    # Prefer API Gateway's admin check
+    if is_admin_header:
+        return is_admin_header.lower() == 'true'
+    
+    # Fallback to parsing scopes (for direct service access or backward compatibility)
+    if not user_scopes:
+        return False
+    
+    scopes = user_scopes.split() if isinstance(user_scopes, str) else []
+    return "api:admin" in scopes
+
+@app.delete("/models/{model_id}", status_code=204, tags=["Models"])
+async def delete_model(
+    model_id: int,
+    user_id: str = Header(..., alias="X-User-Id"),
+    user_scopes: Optional[str] = Header(None, alias="X-Scope"),
+    is_admin_header: Optional[str] = Header(None, alias="X-Is-Admin"),
+    db: Session = Depends(database.get_db)
+):
+    """
+    Delete a model. Only the owner or an admin can delete.
+    
+    This will also cascade delete all model versions.
+    Note: This does NOT delete the actual artifact files in MinIO.
+    To delete artifacts, use the DELETE /artifacts/{artifact_id} endpoint.
+    """
+    db_model = db.query(database.Model).filter(database.Model.id == model_id).first()
+    
+    if not db_model:
+        raise HTTPException(status_code=404, detail="Model not found")
+    
+    # Check authorisation: owner OR admin
+    is_owner = db_model.created_by == user_id
+    is_admin_user = is_admin(user_scopes, is_admin_header)
+    
+    if not (is_owner or is_admin_user):
+        logger.warning(
+            f"User {user_id} denied delete access to model {model_id} "
+            f"(owner: {db_model.created_by}, is_admin: {is_admin_user})"
+        )
+        raise HTTPException(
+            status_code=403,
+            detail="Only the model owner or an admin can delete this model"
+        )
+    
+    try:
+        model_name = db_model.name
+        
+        # Delete model (cascades to versions via foreign key)
+        db.delete(db_model)
+        db.commit()
+        
+        # Publish ModelDeleted event asynchronously
+        if EVENT_PUBLISHING_ENABLED:
+            try:
+                publisher = get_event_publisher()
+                if publisher:
+                    publisher.publish_model_deleted(model_id, model_name)
+            except Exception as e:
+                logger.error(f"Failed to publish ModelDeleted event: {e}")
+                # Don't fail the request if event publishing fails
+        
+        logger.info(
+            f"Model {model_id} ({model_name}) deleted by "
+            f"{'admin' if is_admin_user else 'owner'} {user_id}"
+        )
+        
+        return None
+        
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error deleting model {model_id}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"An unexpected error occurred while deleting the model: {str(e)}"
+        )

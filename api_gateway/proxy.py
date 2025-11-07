@@ -1,13 +1,40 @@
 import asyncio
 import httpx
-from circuitbreaker import circuit, CircuitBreakerError
 from fastapi import Request, HTTPException, status
 from typing import Optional
 import logging
 
+# Try to import circuit breaker, but provide fallback if not available
+try:
+    from circuitbreaker import circuit, CircuitBreakerError
+    CIRCUIT_BREAKER_AVAILABLE = True
+except ImportError:
+    # Fallback: Create a no-op circuit breaker if package not installed
+    CIRCUIT_BREAKER_AVAILABLE = False
+    
+    class CircuitBreakerError(Exception):
+        """Fallback exception if circuitbreaker package not available"""
+        pass
+    
+    def circuit(*args, **kwargs):
+        """Fallback no-op circuit breaker decorator"""
+        def decorator(func):
+            return func
+        return decorator
+
 from config import settings
 
 logger = logging.getLogger(__name__)
+
+# Exception for service unavailable errors
+class ServiceUnavailableError(HTTPException):
+    """Raised when a backend service is unavailable"""
+    def __init__(self, service_name: str, detail: str = None):
+        self.service_name = service_name
+        super().__init__(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=detail or f"Service {service_name} unavailable"
+        )
 
 # Circuit breaker configuration per service
 service_circuit_breakers = {}
@@ -36,15 +63,21 @@ async def proxy_request(
     """
     # Build target URL
     path = request.url.path
-    # Remove /api prefix if present
-    service_path = path.replace("/api", "", 1)
+    # Handle both /api and /public routes
+    # Both should result in the same backend path (without /api or /public prefixes)
+    if path.startswith("/public/"):
+        # Public routes: remove /public prefix (backend doesn't need /api prefix)
+        service_path = path.replace("/public", "", 1)
+    else:
+        # Protected routes: remove /api prefix
+        service_path = path.replace("/api", "", 1)
     target_url = f"{target_service}{service_path}"
     
     # Add query parameters
     if request.url.query:
         target_url += f"?{request.url.query}"
     
-    # Prepare headers
+    # Prepare the headers
     headers = dict(request.headers)
     # Remove host header to avoid conflicts
     headers.pop("host", None)
@@ -64,14 +97,19 @@ async def proxy_request(
     service_name = target_service.split("//")[-1].split(":")[0] if "//" in target_service else "unknown"
     
     try:
-        # Apply circuit breaker
-        circuit_breaker = get_circuit_breaker(service_name)
+        # Apply circuit breaker (if available)
+        if CIRCUIT_BREAKER_AVAILABLE:
+            circuit_breaker = get_circuit_breaker(service_name)
+            request_func = circuit_breaker(_make_request)
+        else:
+            # Fallback: use function directly without circuit breaker
+            request_func = _make_request
         
         # Retry with exponential backoff
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                response = await circuit_breaker(_make_request)(
+                response = await request_func(
                     target_url=target_url,
                     headers=headers,
                     body=body,
@@ -80,8 +118,8 @@ async def proxy_request(
                 return response
             except CircuitBreakerError as e:
                 logger.warning(f"Circuit breaker open for {service_name}: {e}")
-                raise HTTPException(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                raise ServiceUnavailableError(
+                    service_name=service_name,
                     detail=f"Service {service_name} unavailable (circuit breaker open)"
                 )
             except httpx.RequestError as e:
@@ -93,8 +131,8 @@ async def proxy_request(
                     continue
                 else:
                     logger.error(f"Request to {service_name} failed after {max_retries} attempts: {e}")
-                    raise HTTPException(
-                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    raise ServiceUnavailableError(
+                        service_name=service_name,
                         detail=f"Service {service_name} unavailable: {str(e)}"
                     )
         

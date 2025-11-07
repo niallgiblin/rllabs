@@ -1,0 +1,28 @@
+# FastAPI and ASGI server
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+
+# Database
+sqlalchemy==2.0.23
+psycopg2-binary==2.9.9
+
+# Redis for idempotency and caching
+redis==5.0.1
+
+# S3/MinIO client with async support
+aioboto3
+botocore
+
+# HTTP client for calling Model Catalog
+httpx==0.25.1
+
+# Message broker
+pika==1.3.2
+
+# Data validation
+pydantic==2.5.0
+pydantic-settings==2.1.0
+
+# Python utilities
+python-multipart==0.0.6
+requests==2.31.0

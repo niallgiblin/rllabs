@@ -1,11 +1,10 @@
-from fastapi import FastAPI, Request, HTTPException, status, Form, Depends, APIRouter
-from fastapi.responses import Response, RedirectResponse, HTMLResponse, JSONResponse
+from fastapi import FastAPI, Request, HTTPException, status, Depends, APIRouter
+from fastapi.responses import Response, RedirectResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 import logging
 import time
-import json
 from typing import Dict, Any, Optional
 from contextlib import asynccontextmanager
 
@@ -37,7 +36,7 @@ except ImportError:
 
 try:
     from proxy import proxy_request, get_target_service, ServiceUnavailableError
-except ImportError:
+except (ImportError, Exception) as e:
     # Fallback proxy
     class ServiceUnavailableError(Exception):
         def __init__(self, service_name: str):
@@ -52,12 +51,14 @@ except ImportError:
         )
     
     def get_target_service(path: str) -> Optional[str]:
-        # Simple routing logic
+        # Fallback routing logic - should match config.py SERVICES dict
+        # This is used only if proxy import fails
         if path.startswith("/api/models"):
-            return "model-service"
-        elif path.startswith("/api/data"):
-            return "data-service"
-        return None
+            return "http://model-catalog-service:8000"
+        elif path.startswith("/api/uploads"):
+            return "http://upload-download-service:8002"
+        elif path.startswith("/api/downloads"):
+            return "http://upload-download-service:8002" 
 
 # Placeholder for internal router if no mtls
 internal_router = APIRouter()
@@ -74,13 +75,13 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan events"""
-    # Startup
+    
     logger.info("API Gateway starting...")
     logger.info(f"Monitoring: {settings.MONITORING_ENABLED}")
     
     yield
     
-    # Shutdown
+    
     logger.info("API Gateway shutting down...")
 
 # FastAPI App
@@ -94,7 +95,7 @@ app = FastAPI(
 # Include routers
 app.include_router(internal_router, prefix="/internal", tags=["internal"])
 
-# Basic health endpoint for liveness/readiness probes
+# Basic health endpoint
 @app.get("/health")
 async def health():
     return {"status": "ok"}
@@ -177,7 +178,26 @@ async def http_exception_handler(request: Request, exc: HTTPException):
     )
 
 # Protected Route Proxy
-from jwt_auth import get_current_user
+from jwt_auth import get_current_user, bearer_scheme
+from fastapi.security import HTTPAuthorizationCredentials
+
+def get_optional_user(credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)) -> Optional[Dict[str, Any]]:
+    """
+    Optional authentication - returns user if token is valid, None otherwise
+    Used for endpoints that allow both authenticated and unauthenticated access
+    """
+    if credentials is None or not credentials.scheme or credentials.scheme.lower() != "bearer":
+        return None
+    
+    try:
+        from jwt_auth import verify_token
+        payload = verify_token(credentials.credentials)
+        user_id = payload.get("sub")
+        if user_id is None:
+            return None
+        return {"user_id": user_id, "scopes": payload.get("scopes", [])}
+    except Exception:
+        return None
 
 @app.api_route(
     "/api/{path:path}",
@@ -186,51 +206,106 @@ from jwt_auth import get_current_user
 async def proxy_to_service(
     request: Request,
     path: str,
-    current_user: Dict[str, Any] = Depends(get_current_user)
+    current_user: Optional[Dict[str, Any]] = Depends(get_optional_user)
 ):
     """
-    Protected proxy - requires authentication
-    Routes requests to appropriate backend service
+    Smart proxy - conditionally requires authentication
+    - GET /api/models* : Public (no auth required)
+    - GET /api/downloads* : Public (no auth required)
+    - POST/PUT/DELETE /api/models* : Requires auth
+    - All /api/uploads* : Requires auth
+    - DELETE /api/downloads* : Requires auth (for deletion)
     """
-    # Authenticated context
-    user_id = current_user.get("user_id", "anonymous")
-    client_id = user_id
-    scopes = current_user.get("scopes", [])
-    scope = " ".join(scopes) if isinstance(scopes, list) else str(scopes)
+    full_path = f"/api/{path}"
     
-    # Check rate limit
+    # Determine if this endpoint requires authentication
+    requires_auth = False
+    if request.method in ["POST", "PUT", "DELETE", "PATCH"]:
+        # All write operations require auth
+        requires_auth = True
+    elif path.startswith("uploads"):
+        # Upload endpoints always require auth
+        requires_auth = True
+    elif path.startswith("downloads") and request.method == "DELETE":
+        # Delete operations on downloads require auth
+        requires_auth = True
+    # GET /api/models* and GET /api/downloads* are public (no auth required)
+    
+    # Check authentication if required
+    if requires_auth:
+        if current_user is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication required",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        user_id = current_user.get("user_id", "anonymous")
+        client_id = user_id
+        scopes = current_user.get("scopes", [])
+        scope = " ".join(scopes) if isinstance(scopes, list) else str(scopes)
+    else:
+        # Public endpoint - use IP for rate limiting
+        user_id = None
+        client_id = request.client.host if request.client else "unknown"
+        scopes = []
+        scope = ""
+    
+    # Check rate limit (by user_id if authenticated, by IP if not)
     endpoint = f"/{path.split('/')[0]}" if path else "/"
-    check_rate_limit(user_id, endpoint)
+    rate_limit_key = user_id if user_id else f"ip:{client_id}"
+    check_rate_limit(rate_limit_key, endpoint)
     
     # Determine target service
     full_path = f"/api/{path}"
-    target_service = get_target_service(full_path)
+    logger.info(f"[ROUTING] Looking up service for path: '{full_path}' (original path param: '{path}')")
+    
+    try:
+        target_service = get_target_service(full_path)
+        logger.info(f"[ROUTING] Service lookup result for '{full_path}': {target_service}")
+    except Exception as e:
+        logger.error(f"[ROUTING] Error in get_target_service: {e}", exc_info=True)
+        target_service = None
     
     if not target_service:
+        logger.error(f"[ROUTING] No service found for path '{full_path}' (original path: '{path}')")
+        logger.error(f"[ROUTING] Available services: {list(settings.SERVICES.keys())}")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Service not found"
         )
     
-    # Log request
+    # Log request with auth status for monitoring
+    auth_status = "authenticated" if user_id else "anonymous"
+    auth_status_detail = f"User {user_id}" if user_id else f"Anonymous (IP: {client_id})"
     logger.info(
-        f"User {user_id} (client: {client_id}) -> {request.method} {full_path} -> {target_service}"
+        f"[{auth_status.upper()}] {auth_status_detail} -> {request.method} {full_path} -> {target_service}"
     )
     
     try:
-        # Proxy request with user context
+        # Prepare headers
+        extra_headers = {
+            'X-Client-ID': client_id,
+            'X-Forwarded-For': request.headers.get('X-Forwarded-For', ''),
+            'X-Real-IP': request.client.host if request.client else ''
+        }
+        
+        # Add user context if authenticated
+        if user_id:
+            from jwt_auth import is_admin
+            is_admin_user = is_admin(scopes)
+            extra_headers.update({
+                'X-User-ID': user_id,
+                'X-User-Id': user_id,
+                'X-Scope': scope,
+                'X-Is-Admin': 'true' if is_admin_user else 'false',
+            })
+        
+        # Proxy request
         response = await proxy_request(
             request=request,
             target_service=target_service,
             user_id=user_id,
-            extra_headers={
-                'X-User-ID': user_id,
-                'X-User-Id': user_id,
-                'X-Client-ID': client_id,
-                'X-Scope': scope,
-                'X-Forwarded-For': request.headers.get('X-Forwarded-For', ''),
-                'X-Real-IP': request.client.host if request.client else ''
-            }
+            extra_headers=extra_headers
         )
         
         # Return response

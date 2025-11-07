@@ -25,6 +25,12 @@ spec:
               value: "redis"
             - name: REDIS_PORT
               value: "6379"
+            # Service URLs for routing (consistent with Docker Compose and Kubernetes)
+            # Note: These are informational - actual routing uses config.py SERVICES dict
+            - name: UPLOAD_DOWNLOAD_SERVICE_URL
+              value: "http://upload-download-service:8002"
+            - name: MODEL_CATALOG_SERVICE_URL
+              value: "http://model-catalog-service:8000"
           resources:
             requests:
               cpu: "100m"
