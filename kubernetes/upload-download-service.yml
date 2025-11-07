@@ -1,0 +1,89 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: upload-download-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: upload-download-service
+  template:
+    metadata:
+      labels:
+        app: upload-download-service
+    spec:
+      containers:
+        - name: upload-download-service
+          image: upload-download-service
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8002
+          env:
+            # MinIO Configuration
+            - name: S3_ENDPOINT_URL
+              value: "http://minio:9000"
+            - name: S3_ACCESS_KEY
+              value: "minioadmin"
+            - name: S3_SECRET_KEY
+              value: "minioadmin_password"
+            - name: S3_BUCKET
+              value: "models"
+            - name: S3_USE_SSL
+              value: "false"
+            # PostgreSQL Configuration
+            - name: DATABASE_URL
+              value: "postgresql://rllabs:rllabs_password@postgres/upload_download_db"
+            # Redis Configuration
+            - name: REDIS_HOST
+              value: "redis"
+            - name: REDIS_PORT
+              value: "6379"
+            - name: REDIS_URL
+              value: "redis://redis:6379/0"
+            # RabbitMQ Configuration
+            - name: RABBITMQ_HOST
+              value: "rabbitmq"
+            - name: RABBITMQ_PORT
+              value: "5672"
+            - name: RABBITMQ_USER
+              value: "admin"
+            - name: RABBITMQ_PASS
+              value: "admin_password"
+            - name: MODEL_CATALOG_URL
+              value: "http://model-catalog-service:8000"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8002
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8002
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: upload-download-service
+spec:
+  selector:
+    app: upload-download-service
+  ports:
+    - protocol: TCP
+      port: 8002
+      targetPort: 8002
+

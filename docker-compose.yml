@@ -10,15 +10,16 @@ services:
       REDIS_PORT: 6379
     depends_on:
       - redis
-      - model_catalog_service
+      - model-catalog-service
+      - upload-download-service
     networks:
       - rllabs-network
 
   # Model Catalog Service (AP System)
-  model_catalog_service:
+  model-catalog-service:
     build:
       context: ./model_catalog_service
-    container_name: model_catalog_service
+    container_name: model-catalog-service
     # Expose for local tests hitting localhost:8001
     ports:
       - "8001:8000"
@@ -42,6 +43,49 @@ services:
     volumes:
       - ./model_catalog_service:/app
 
+  # Upload/Download Service
+  upload-download-service:
+    build:
+      context: ./upload_download_service
+    container_name: upload-download-service
+    # Expose for local tests hitting localhost:8002
+    ports:
+      - "8002:8002"
+    environment:
+      # MinIO Configuration
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=minioadmin
+      - MINIO_SECRET_KEY=minioadmin_password
+      - MINIO_BUCKET=models
+      - MINIO_USE_SSL=false
+      # PostgreSQL Configuration
+      - DATABASE_URL=postgresql://rllabs:rllabs_password@postgres/upload_download_db
+      # Redis Configuration
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      # RabbitMQ Configuration
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_PORT=5672
+      - RABBITMQ_USER=admin
+      - RABBITMQ_PASS=admin_password
+      # Service URLs
+      - MODEL_CATALOG_URL=http://model-catalog-service:8000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      db-init:
+        condition: service_completed_successfully
+    networks:
+      - rllabs-network
+    volumes:
+      - ./upload_download_service:/app
+
   # PostgreSQL Database for Model Catalog Service (Metadata)
   postgres:
     image: postgres:13
@@ -57,10 +101,28 @@ services:
     networks:
       - rllabs-network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U rllabs -d model_catalog_db"]
+      # Use default database (postgres) for health check - pg_isready doesn't need a specific DB
+      test: ["CMD-SHELL", "pg_isready -U rllabs -d postgres"]
       interval: 10s
       timeout: 5s
       retries: 5
+
+  # Initialize additional databases
+  db-init:
+    image: postgres:13
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - rllabs-network
+    environment:
+      PGPASSWORD: rllabs_password
+    entrypoint: >
+      /bin/sh -c "
+      psql -h postgres -U rllabs -d postgres -tc \"SELECT 1 FROM pg_database WHERE datname = 'upload_download_db'\" | grep -q 1 || psql -h postgres -U rllabs -d postgres -c \"CREATE DATABASE upload_download_db;\";
+      echo 'Database initialization complete';
+      exit 0;
+      "
 
   # Redis for Caching and Rate Limiting
   redis:

@@ -1,4 +1,3 @@
-
 import jwt
 from datetime import datetime, timedelta
 from fastapi import HTTPException, status, Depends
@@ -6,7 +5,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Optional, List, Dict
 
 # Configuration for JWT
-SECRET_KEY = "your-secret-key"  # In prod, load from env vars
+SECRET_KEY = "your-secret-key"  # In production, load from env vars
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
@@ -58,7 +57,7 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(b
         )
     token = credentials.credentials
     payload = verify_token(token)
-    user_id: str = payload.get("sub")
+    user_id = payload.get("sub")
     if user_id is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -80,3 +79,15 @@ def has_permission(required_scopes: List[str]):
             )
         return current_user
     return _has_permission
+
+def is_admin(user_scopes: List[str]) -> bool:
+    """
+    Check if user has admin privileges.
+    
+    Args:
+        user_scopes: List of scopes from JWT token (e.g., ["api:read", "api:write", "api:admin"])
+    
+    Returns:
+        True if user has admin scope, False otherwise
+    """
+    return "api:admin" in user_scopes if user_scopes else False

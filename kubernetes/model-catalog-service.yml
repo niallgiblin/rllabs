@@ -25,6 +25,14 @@ spec:
               value: "redis"
             - name: REDIS_PORT
               value: "6379"
+            - name: RABBITMQ_HOST
+              value: "rabbitmq"
+            - name: RABBITMQ_PORT
+              value: "5672"
+            - name: RABBITMQ_USER
+              value: "admin"
+            - name: RABBITMQ_PASS
+              value: "admin_password"
           resources:
             requests:
               cpu: "100m"

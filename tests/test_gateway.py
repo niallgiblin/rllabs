@@ -37,11 +37,36 @@ def test_health_check():
     assert data["status"] == "ok"
     
 
-# Protected route tests
-def test_protected_route_without_auth():
-    """Test accessing protected route without authentication"""
+# Public catalog browsing tests
+def test_public_catalog_browsing_without_auth():
+    """Test that GET /api/models is public (no auth required)"""
     response = requests.get(f"{GATEWAY_URL}/api/models")
-    assert response.status_code == 401
+    # Should succeed without authentication (public endpoint)
+    assert response.status_code in [200, 503, 404], f"Expected public access, got {response.status_code}"
+
+def test_public_catalog_browsing_with_auth(auth_headers):
+    """Test that GET /api/models works with authentication too"""
+    response = requests.get(f"{GATEWAY_URL}/api/models", headers=auth_headers)
+    # Should succeed with or without auth
+    assert response.status_code in [200, 503, 404]
+
+def test_public_model_details_without_auth():
+    """Test that GET /api/models/{id} is public (no auth required)"""
+    # Try with a likely non-existent ID - should get 404, not 401
+    response = requests.get(f"{GATEWAY_URL}/api/models/999999")
+    # Should get 404 (not found) or 503 (service unavailable), not 401 (unauthorized)
+    assert response.status_code in [404, 503], f"Expected public access, got {response.status_code}"
+
+# Protected route tests (write operations)
+def test_protected_write_route_without_auth():
+    """Test that POST/PUT/DELETE require authentication"""
+    # POST should require auth
+    response = requests.post(f"{GATEWAY_URL}/api/models", json={"name": "test"})
+    assert response.status_code == 401, "POST should require authentication"
+    
+    # DELETE should require auth
+    response = requests.delete(f"{GATEWAY_URL}/api/models/1")
+    assert response.status_code == 401, "DELETE should require authentication"
 
 def test_protected_route_with_auth(auth_headers):
     """Test accessing protected route with authentication"""
@@ -50,10 +75,11 @@ def test_protected_route_with_auth(auth_headers):
     assert response.status_code in [200, 503, 404]
 
 def test_protected_route_with_invalid_token():
-    """Test accessing protected route with an invalid token"""
+    """Test accessing protected route (POST/DELETE) with an invalid token"""
+    # GET /api/models is now public, so test with a protected endpoint (POST)
     headers = {"Authorization": "Bearer invalid-token"}
-    response = requests.get(f"{GATEWAY_URL}/api/models", headers=headers)
-    assert response.status_code == 401
+    response = requests.post(f"{GATEWAY_URL}/api/models", json={"name": "test"}, headers=headers)
+    assert response.status_code == 401, "Protected write operations should require valid auth"
 
 # Public route tests
 def test_public_route():
@@ -63,11 +89,21 @@ def test_public_route():
     assert response.status_code in [200, 503, 404]
 
 # Rate limiting tests
-def test_rate_limiting(auth_headers):
-    """Test rate limiting (if Redis is running)"""
+def test_rate_limiting_authenticated(auth_headers):
+    """Test rate limiting for authenticated users (if Redis is running)"""
     # Make multiple requests quickly
     for i in range(10):
         response = requests.get(f"{GATEWAY_URL}/api/models", headers=auth_headers)
+        # If rate limited, we'll get 429, otherwise 200, 503 or 404
+        if response.status_code == 429:
+            assert "Rate limit exceeded" in response.json()["detail"]
+            break
+
+def test_rate_limiting_unauthenticated():
+    """Test IP-based rate limiting for unauthenticated users"""
+    # Make multiple requests quickly without auth
+    for i in range(10):
+        response = requests.get(f"{GATEWAY_URL}/api/models")
         # If rate limited, we'll get 429, otherwise 200, 503 or 404
         if response.status_code == 429:
             assert "Rate limit exceeded" in response.json()["detail"]

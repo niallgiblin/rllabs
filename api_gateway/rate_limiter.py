@@ -16,14 +16,18 @@ redis_client = redis.Redis(
 # In-memory fallback rate limiter
 _in_memory_rate_limits = {}
 
-def check_rate_limit(user_id: str, endpoint: str) -> bool:
+def check_rate_limit(identifier: str, endpoint: str) -> bool:
     """
-    Check if user has exceeded rate limit
+    Check if user/IP has exceeded rate limit
     Uses sliding window algorithm with Redis, with in-memory fallback
+    
+    Args:
+        identifier: User ID (e.g., "user-123") or IP address (e.g., "ip:192.168.1.1")
+        endpoint: Endpoint path for rate limiting
     
     Failure mode: Fail-open with degraded in-memory protection
     """
-    key = f"rate_limit:{user_id}:{endpoint}"
+    key = f"rate_limit:{identifier}:{endpoint}"
     
     try:
         pipe = redis_client.pipeline()
@@ -70,7 +74,7 @@ def check_rate_limit(user_id: str, endpoint: str) -> bool:
         in_memory_limit = settings.RATE_LIMIT_REQUESTS * 2
         
         if _in_memory_rate_limits[key]['count'] > in_memory_limit:
-            logger.warning(f"In-memory rate limit exceeded for {user_id} on {endpoint}")
+            logger.warning(f"In-memory rate limit exceeded for {identifier} on {endpoint}")
             # Don't reject in fallback mode - fail open with logging
             return True
         
