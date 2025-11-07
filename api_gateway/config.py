@@ -11,15 +11,15 @@ class Settings(BaseSettings):
     REDIS_PORT: int = 6379
     
     # Service Registry
-    # Routes are matched in order - most specific routes should come first
+    # Routes are matched in order. most specific routes should come first
     SERVICES: Dict[str, str] = {
         
         # Upload/Download Service
-        "/api/uploads": "http://upload_download_service:8002",
-        "/api/downloads": "http://upload_download_service:8002",
+        "/api/uploads": "http://upload-download-service:8002",
+        "/api/downloads": "http://upload-download-service:8002",
         
         # Model Catalog Service
-        "/api/models": "http://model_catalog_service:8000",
+        "/api/models": "http://model-catalog-service:8000",
         
         # Future services (commented out until implemented)
         # "/api/training": "http://training-service:8003",

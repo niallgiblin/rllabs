@@ -17,7 +17,7 @@ Trade-offs:
 - Fail-open on events: Upload succeeds even if event publishing fails (availability over consistency)
 """
 
-from fastapi import FastAPI, Depends, HTTPException, Header, status
+from fastapi import FastAPI, Depends, HTTPException, Header, status, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from contextlib import asynccontextmanager
@@ -34,6 +34,8 @@ from models import (
 from storage import StorageService
 from session_manager import SessionManager
 from event_publisher import get_event_publisher
+from authorization import check_download_permission
+from database import UploadSession
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -46,7 +48,7 @@ MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
 MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "minioadmin_password")
 MINIO_BUCKET = os.getenv("MINIO_BUCKET", "models")
 MINIO_USE_SSL = os.getenv("MINIO_USE_SSL", "false").lower() == "true"
-MODEL_CATALOG_URL = os.getenv("MODEL_CATALOG_URL", "http://model_catalog_service:8000")
+MODEL_CATALOG_URL = os.getenv("MODEL_CATALOG_URL", "http://model-catalog-service:8000")
 
 # Application lifespan - handles startup and shutdown
 @asynccontextmanager
@@ -365,38 +367,47 @@ async def abort_upload(
             detail=f"Failed to abort upload: {str(e)}"
         )
 
-
 @app.get("/downloads/{artifact_id}", response_model=DownloadResponse, tags=["Downloads"])
 async def get_download_url(
     artifact_id: str,
     expires_in: int = 3600,
     db: Session = Depends(get_db),
-    user_id: str = Header(..., alias="X-User-Id")
+    user_id: Optional[str] = Header(None, alias="X-User-Id")
 ):
     """
     Generate a presigned download URL
     
     Flow:
-    1. Verify artifact exists in storage
-    2. Check user permissions (placeholder - extend with RBAC if needed)
+    1. Check user permissions via RBAC (public downloads allowed, authenticated users checked)
+    2. Verify artifact exists in storage
     3. Generate time-limited presigned GET URL
     4. Log download request for audit trail
     5. Optionally publish ArtifactDownloaded event
     
-    Architectural Decision: Presigned URLs for direct downloads
+    Authorisation Rules:
+    - Public downloads: Unauthenticated users can download any artifact
+    - Authenticated users: Must be owner or have model-level access
+    - RBAC enforced via check_download_permission() before generating presigned URL
+    
+    Architecture Decision: Presigned URLs for direct downloads
     - Trade-off: High performance (direct MinIO access) but time-limited URLs
     - Security: URLs expire (default 1 hour), preventing URL sharing
     - No bandwidth through our service = better scalability
+    - RBAC enforced in application layer before MinIO access
     
     Args:
         artifact_id: Content hash (sha256:...) of the artifact
         expires_in: URL expiration time in seconds (default: 3600 = 1 hour)
-        user_id: User ID from API Gateway
+        user_id: User ID from API Gateway (optional - downloads are public)
     
     Returns:
         Presigned download URL and file metadata
     """
-    logger.info(f"User {user_id} requesting download for {artifact_id}")
+    # Log download request (authenticated or public)
+    if user_id:
+        logger.info(f"User {user_id} requesting download for {artifact_id}")
+    else:
+        logger.info(f"Public download requested for {artifact_id}")
     
     storage = StorageService(
         endpoint=MINIO_ENDPOINT,
@@ -407,7 +418,39 @@ async def get_download_url(
     )
     
     try:
-        # Verify artifact exists and get metadata
+        # STEP 1: AUTHORIZATION CHECK (before generating presigned URL)
+        # This is critical for security - we check permissions in our service
+        # before allowing access to MinIO. MinIO doesn't know about users/models.
+        has_permission, error_code = await check_download_permission(db, user_id, artifact_id)
+        if not has_permission:
+            if error_code == "404":
+                # Artifact not found in our system
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Artifact {artifact_id} not found"
+                )
+            elif error_code == "400":
+                # Invalid artifact_id format
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid artifact_id format: {artifact_id}"
+                )
+            elif error_code == "500":
+                # Internal error
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Internal error checking permissions"
+                )
+            else:
+                # Default to 403 Forbidden
+                user_context = f"User {user_id}" if user_id else "Anonymous user"
+                logger.warning(f"{user_context} denied access to artifact {artifact_id}")
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="You do not have permission to download this artifact"
+                )
+        
+        # STEP 2: Verify artifact exists in storage
         object_key = artifact_id  # artifact_id is the content-addressed key
         file_info = await storage.get_object_info(object_key)
         
@@ -416,10 +459,6 @@ async def get_download_url(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Artifact {artifact_id} not found"
             )
-        
-        # TODO: Add RBAC permission check here
-        # For now, any authenticated user can download
-        # Future: Check if user has access to the model this artifact belongs to
         
         # Generate presigned download URL
         download_url = await storage.generate_presigned_get_url(
@@ -438,7 +477,7 @@ async def get_download_url(
             if publisher:
                 publisher.publish_artifact_downloaded(
                     artifact_id=artifact_id,
-                    downloaded_by=user_id
+                    downloaded_by=user_id or "anonymous"
                 )
         except Exception as e:
             logger.warning(f"Failed to publish ArtifactDownloaded event: {e}")
@@ -460,6 +499,132 @@ async def get_download_url(
             detail=f"Failed to generate download URL: {str(e)}"
         )
 
+@app.delete("/artifacts/{artifact_id}", status_code=204, tags=["Downloads"])
+async def delete_artifact(
+    artifact_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    user_id: str = Header(..., alias="X-User-Id"),
+    user_scopes: Optional[str] = Header(None, alias="X-Scope")
+):
+    """
+    Delete an artifact. Only the owner or an admin can delete.
+    
+    This will:
+    1. Check authorization (owner or admin)
+    2. Delete the artifact file from MinIO storage
+    3. Optionally mark upload sessions as deleted (soft delete)
+    
+    Note: This is a hard delete - the artifact will be permanently removed.
+    Consider implementing soft delete if you need recovery capabilities.
+    
+    Args:
+        artifact_id: Content hash (sha256:...) of the artifact
+        user_id: User ID from API Gateway
+        user_scopes: Space-separated scopes from X-Scope header
+    
+    Returns:
+        204 No Content on success
+    """
+    logger.info(f"User {user_id} requesting delete for artifact {artifact_id}")
+    
+    # Validate artifact_id format
+    if not artifact_id.startswith("sha256:") or len(artifact_id) != 71:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid artifact_id format: {artifact_id}"
+        )
+    
+    storage = StorageService(
+        endpoint=MINIO_ENDPOINT,
+        access_key=MINIO_ACCESS_KEY,
+        secret_key=MINIO_SECRET_KEY,
+        bucket=MINIO_BUCKET,
+        use_ssl=MINIO_USE_SSL
+    )
+    
+    try:
+        # STEP 1: Find upload session to check ownership
+        from sqlalchemy import case
+        from database import UploadStatus
+        
+        session = db.query(UploadSession).filter(
+            UploadSession.file_hash == artifact_id
+        ).order_by(
+            case(
+                (UploadSession.status == UploadStatus.COMPLETED, 0),
+                else_=1
+            ),
+            UploadSession.created_at.desc()
+        ).first()
+        
+        if not session:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Artifact {artifact_id} not found"
+            )
+        
+        # STEP 2: Check authorization (owner OR admin)
+        is_owner = session.user_id == user_id
+        
+        # Check admin scope (prefer X-Is-Admin header from API Gateway)
+        is_admin_user = False
+        is_admin_header = request.headers.get("X-Is-Admin", "").lower() == "true"
+        if is_admin_header:
+            is_admin_user = True
+        elif user_scopes:
+            # Fallback to parsing scopes (for direct service access)
+            scopes = user_scopes.split() if isinstance(user_scopes, str) else []
+            is_admin_user = "api:admin" in scopes
+        
+        if not (is_owner or is_admin_user):
+            logger.warning(
+                f"User {user_id} denied delete access to artifact {artifact_id} "
+                f"(owner: {session.user_id}, is_admin: {is_admin_user})"
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only the artifact owner or an admin can delete this artifact"
+            )
+        
+        # STEP 3: Delete from MinIO storage
+        object_key = artifact_id
+        try:
+            await storage.delete_object(object_key)
+            logger.info(f"Deleted artifact {artifact_id} from MinIO storage")
+        except Exception as e:
+            logger.warning(f"Failed to delete artifact {artifact_id} from storage: {e}")
+            # Continue even if storage delete fails (best effort)
+        
+        # STEP 4: Optionally mark sessions as deleted (soft delete)
+        # For now, we'll leave sessions in the database for audit trail
+        # You can add a 'deleted_at' field if you want soft delete
+        
+        logger.info(
+            f"Artifact {artifact_id} deleted by "
+            f"{'admin' if is_admin_user else 'owner'} {user_id}"
+        )
+        
+        # Optional: Publish ArtifactDeleted event
+        try:
+            publisher = get_event_publisher()
+            if publisher:
+                # Assuming event publisher has this method
+                # publisher.publish_artifact_deleted(artifact_id=artifact_id, deleted_by=user_id)
+                pass
+        except Exception as e:
+            logger.warning(f"Failed to publish ArtifactDeleted event: {e}")
+        
+        return None  # 204 No Content
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting artifact {artifact_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete artifact: {str(e)}"
+        )
 
 async def register_with_model_catalog(
     model_id: int,

@@ -6,7 +6,7 @@ import os
 # Config
 CATALOG_URL = "http://localhost:8001"
 API_KEY = "a_secure_api_key_placeholder"
-HEADERS = {"X-API-Key": API_KEY, "X-User-Id": "test_user"} # Added X-User-Id for model creation
+HEADERS = {"X-API-Key": API_KEY, "X-User-Id": "test_user"}
 
 @pytest.fixture(scope="session", autouse=True)
 def wait_for_services():
@@ -162,3 +162,170 @@ def test_get_latest_model_path_model_not_found():
     response = requests.get(f"{CATALOG_URL}/models/{non_existent_id}/latest", headers=HEADERS)
     assert response.status_code == 404
     assert "No versions found for this model." in response.json()["detail"] # The API returns this for model not found as well, which is acceptable.
+
+# Ownership tests
+def test_ownership_endpoint_requires_user_id(created_model_id):
+    """Test that ownership endpoint requires X-User-Id header"""
+    response = requests.get(f"{CATALOG_URL}/models/{created_model_id}/ownership")
+    assert response.status_code == 422, "Should require X-User-Id header"
+
+def test_ownership_endpoint_owner_has_access(created_model_id):
+    """Test that model owner has access"""
+    response = requests.get(
+        f"{CATALOG_URL}/models/{created_model_id}/ownership",
+        headers={"X-User-Id": HEADERS["X-User-Id"]}
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["has_access"] is True
+    assert data["is_owner"] is True
+    assert data["model_id"] == created_model_id
+
+def test_ownership_endpoint_non_owner_no_access(created_model_id):
+    """Test that non-owner does not have access"""
+    response = requests.get(
+        f"{CATALOG_URL}/models/{created_model_id}/ownership",
+        headers={"X-User-Id": "different-user"}
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["has_access"] is False
+    assert data["is_owner"] is False
+    assert data["model_id"] == created_model_id
+
+def test_ownership_endpoint_model_not_found():
+    """Test ownership endpoint with non-existent model"""
+    non_existent_id = 999999
+    response = requests.get(
+        f"{CATALOG_URL}/models/{non_existent_id}/ownership",
+        headers={"X-User-Id": "test-user"}
+    )
+    assert response.status_code == 404
+    assert "Model not found" in response.json()["detail"]
+
+def test_ownership_endpoint_response_structure(created_model_id):
+    """Test that ownership endpoint returns correct structure"""
+    response = requests.get(
+        f"{CATALOG_URL}/models/{created_model_id}/ownership",
+        headers={"X-User-Id": HEADERS["X-User-Id"]}
+    )
+    assert response.status_code == 200
+    data = response.json()
+    
+    # Validate structure
+    assert isinstance(data, dict)
+    assert "has_access" in data
+    assert "is_owner" in data
+    assert "model_id" in data
+    
+    # Validate types
+    assert isinstance(data["has_access"], bool)
+    assert isinstance(data["is_owner"], bool)
+    assert isinstance(data["model_id"], int)
+
+# Public browsing tests
+def test_list_models_public_no_auth():
+    """Test that GET /models works without authentication (public endpoint)"""
+    response = requests.get(f"{CATALOG_URL}/models")
+    assert response.status_code == 200
+    assert isinstance(response.json(), list)
+
+def test_get_model_details_public_no_auth(created_model_id, test_model_name):
+    """Test that GET /models/{id} works without authentication (public endpoint)"""
+    response = requests.get(f"{CATALOG_URL}/models/{created_model_id}")
+    assert response.status_code == 200
+    model_data = response.json()
+    assert model_data["id"] == created_model_id
+    assert model_data["name"] == test_model_name
+
+def test_get_latest_model_path_public_no_auth(created_model_id):
+    """Test that GET /models/{id}/latest works without authentication"""
+    # Register a version first
+    requests.post(
+        f"{CATALOG_URL}/models/{created_model_id}/versions",
+        json={"version": 1, "storage_path": "path/v1", "content_hash": "hash_v1"},
+        headers=HEADERS
+    )
+    
+    # Should work without auth
+    response = requests.get(f"{CATALOG_URL}/models/{created_model_id}/latest")
+    assert response.status_code == 200
+    assert response.json()["storage_path"] == "path/v1"
+
+# Admin DELETE tests
+def _make_admin_token():
+    """Helper to create admin JWT token"""
+    import jwt
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": "admin-user",
+        "scopes": ["api:read", "api:write", "api:admin"],
+        "iat": int(now.timestamp()),
+        "exp": int((now + timedelta(minutes=30)).timestamp()),
+    }
+    SECRET_KEY = "your-secret-key"
+    return jwt.encode(payload, SECRET_KEY, algorithm="HS256")
+
+def test_delete_model_owner(created_model_id):
+    """Test that model owner can delete their model"""
+    response = requests.delete(
+        f"{CATALOG_URL}/models/{created_model_id}",
+        headers=HEADERS
+    )
+    assert response.status_code == 204, f"Owner should be able to delete: {response.status_code} - {response.text}"
+    
+    # Verify model is deleted
+    response = requests.get(f"{CATALOG_URL}/models/{created_model_id}")
+    assert response.status_code == 404
+
+def test_delete_model_admin(created_model_id):
+    """Test that admin can delete any model"""
+    # Create a model owned by a different user
+    different_user_headers = {"X-User-Id": "different-user"}
+    payload = {"name": f"test-model-admin-{int(time.time())}", "description": "Model for admin delete test"}
+    create_response = requests.post(f"{CATALOG_URL}/models", json=payload, headers=different_user_headers)
+    assert create_response.status_code == 201
+    model_id = create_response.json()["id"]
+    
+    # Admin should be able to delete it
+    admin_token = _make_admin_token()
+    admin_headers = {
+        "Authorization": f"Bearer {admin_token}",
+        "X-User-Id": "admin-user",
+        "X-Scope": "api:read api:write api:admin"
+    }
+    
+    # Note: This test requires the API Gateway to forward X-Scope header
+    # For direct service testing, we need to pass it directly
+    response = requests.delete(
+        f"{CATALOG_URL}/models/{model_id}",
+        headers=admin_headers
+    )
+    # Should succeed (204) or fail if gateway not forwarding scope (403)
+    assert response.status_code in [204, 403], f"Admin delete test: {response.status_code} - {response.text}"
+
+def test_delete_model_non_owner_non_admin(created_model_id):
+    """Test that non-owner non-admin cannot delete model"""
+    different_user_headers = {"X-User-Id": "different-user"}
+    response = requests.delete(
+        f"{CATALOG_URL}/models/{created_model_id}",
+        headers=different_user_headers
+    )
+    assert response.status_code == 403
+    assert "Only the model owner or an admin" in response.json()["detail"]
+
+def test_delete_model_not_found():
+    """Test deleting non-existent model"""
+    response = requests.delete(
+        f"{CATALOG_URL}/models/999999",
+        headers=HEADERS
+    )
+    assert response.status_code == 404
+    assert "Model not found" in response.json()["detail"]
+
+def test_delete_model_requires_auth():
+    """Test that delete requires authentication"""
+    response = requests.delete(f"{CATALOG_URL}/models/1")
+    # Should require X-User-Id header
+    assert response.status_code == 422

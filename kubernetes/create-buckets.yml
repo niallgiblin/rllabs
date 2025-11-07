@@ -5,15 +5,30 @@ metadata:
 spec:
   template:
     spec:
+      initContainers:
+      - name: wait-for-minio
+        image: curlimages/curl:latest
+        command:
+          - /bin/sh
+          - -c
+          - |
+            until curl -f http://minio:9000/minio/health/live; do
+              echo "Waiting for MinIO to be ready..."
+              sleep 2
+            done
+            echo "MinIO is ready!"
       containers:
       - name: mc
         image: minio/mc
         command:
         - /bin/sh
         - -c
-        - >
-          /usr/bin/mc alias set rllabs_minio http://minio:9000 minioadmin minioadmin_password;
-          /usr/bin/mc mb rllabs_minio/models;
-          /usr/bin/mc policy set public rllabs_minio/models;
+        - |
+          echo "Setting up MinIO buckets..."
+          /usr/bin/mc alias set rllabs_minio http://minio:9000 minioadmin minioadmin_password || exit 1;
+          /usr/bin/mc mb rllabs_minio/models || true;
+          /usr/bin/mc anonymous set public rllabs_minio/models || echo "Warning: Could not set models bucket policy";
+          echo "Buckets created successfully:";
+          /usr/bin/mc ls rllabs_minio;
           exit 0;
       restartPolicy: OnFailure

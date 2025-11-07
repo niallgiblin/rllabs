@@ -10,16 +10,16 @@ services:
       REDIS_PORT: 6379
     depends_on:
       - redis
-      - model_catalog_service
-      - upload_download_service
+      - model-catalog-service
+      - upload-download-service
     networks:
       - rllabs-network
 
   # Model Catalog Service (AP System)
-  model_catalog_service:
+  model-catalog-service:
     build:
       context: ./model_catalog_service
-    container_name: model_catalog_service
+    container_name: model-catalog-service
     # Expose for local tests hitting localhost:8001
     ports:
       - "8001:8000"
@@ -44,10 +44,10 @@ services:
       - ./model_catalog_service:/app
 
   # Upload/Download Service
-  upload_download_service:
+  upload-download-service:
     build:
       context: ./upload_download_service
-    container_name: upload_download_service
+    container_name: upload-download-service
     # Expose for local tests hitting localhost:8002
     ports:
       - "8002:8002"
@@ -69,7 +69,7 @@ services:
       - RABBITMQ_USER=admin
       - RABBITMQ_PASS=admin_password
       # Service URLs
-      - MODEL_CATALOG_URL=http://model_catalog_service:8000
+      - MODEL_CATALOG_URL=http://model-catalog-service:8000
     depends_on:
       postgres:
         condition: service_healthy
@@ -101,7 +101,8 @@ services:
     networks:
       - rllabs-network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U rllabs"]
+      # Use default database (postgres) for health check - pg_isready doesn't need a specific DB
+      test: ["CMD-SHELL", "pg_isready -U rllabs -d postgres"]
       interval: 10s
       timeout: 5s
       retries: 5

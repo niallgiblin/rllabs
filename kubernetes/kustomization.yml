@@ -3,7 +3,10 @@ kind: Kustomization
 resources:
   - postgres.yml
   - redis.yml
+  - rabbitmq.yml
   - minio.yml
   - create-buckets.yml
+  - init-db.yml
   - model-catalog-service.yml
+  - upload-download-service.yml
   - api-gateway.yml
