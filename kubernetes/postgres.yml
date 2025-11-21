@@ -1,3 +1,41 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init-script
+data:
+  create-multiple-databases.sh: |
+    #!/bin/bash
+    # PostgreSQL initialization script to create multiple databases
+    # This script is executed when the PostgreSQL container first starts
+    
+    set -e
+    set -u
+    
+    function create_database() {
+    	local database=$1
+    	echo "Checking if database '$database' exists..."
+    	
+    	# Check if database exists
+    	if psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" -lqt | cut -d \| -f 1 | grep -qw "$database"; then
+    		echo "Database '$database' already exists, skipping creation"
+    	else
+    		echo "Creating database '$database'"
+    		psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" <<-EOSQL
+    		    CREATE DATABASE $database;
+    		    GRANT ALL PRIVILEGES ON DATABASE $database TO $POSTGRES_USER;
+    EOSQL
+    	fi
+    }
+    
+    # Create databases if they don't exist
+    if [ -n "$POSTGRES_MULTIPLE_DATABASES" ]; then
+    	echo "Multiple database creation requested: $POSTGRES_MULTIPLE_DATABASES"
+    	for db in $(echo $POSTGRES_MULTIPLE_DATABASES | tr ',' ' '); do
+    		create_database $db
+    	done
+    	echo "Multiple databases created"
+    fi
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -22,11 +60,17 @@ spec:
               value: "rllabs_password"
             - name: POSTGRES_DB
               value: "model_catalog_db"
+            - name: POSTGRES_MULTIPLE_DATABASES
+              value: "upload_download_db"
           ports:
             - containerPort: 5432
           volumeMounts:
             - name: postgres-storage
               mountPath: /var/lib/postgresql/data
+            - name: postgres-init-script
+              mountPath: /docker-entrypoint-initdb.d/create-multiple-databases.sh
+              subPath: create-multiple-databases.sh
+              readOnly: true
           readinessProbe:
             exec:
               command:
@@ -50,6 +94,10 @@ spec:
         - name: postgres-storage
           persistentVolumeClaim:
             claimName: postgres-pvc
+        - name: postgres-init-script
+          configMap:
+            name: postgres-init-script
+            defaultMode: 0755
 ---
 apiVersion: v1
 kind: Service

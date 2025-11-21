@@ -94,6 +94,15 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# Add Prometheus metrics
+try:
+    from prometheus_fastapi_instrumentator import Instrumentator
+    instrumentator = Instrumentator()
+    instrumentator.instrument(app).expose(app)
+    logger.info("Prometheus metrics enabled")
+except ImportError:
+    logger.warning("prometheus-fastapi-instrumentator not available - metrics disabled")
+
 # Healthcheck
 @app.get("/health", tags=["Monitoring"])
 async def health_check(db: Session = Depends(database.get_db)):

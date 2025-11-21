@@ -1,5 +1,7 @@
 pytest
+pytest-asyncio
+httpx
 requests
-redis
-PyJWT
-pika
+
+# Load testing
+aiohttp

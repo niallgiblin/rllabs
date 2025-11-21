@@ -9,7 +9,18 @@ from datetime import datetime, timezone
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://rllabs:rllabs_password@localhost/model_catalog_db")
 
-engine = create_engine(DATABASE_URL)
+# Configure connection pooling for better performance under load
+engine = create_engine(
+    DATABASE_URL,
+    pool_size=10,  # Number of connections to maintain in the pool
+    max_overflow=20,  # Additional connections that can be created on demand
+    pool_pre_ping=True,  # Verify connections before using (handles network issues)
+    pool_recycle=3600,  # Recycle connections after 1 hour
+    connect_args={
+        "connect_timeout": 10,  # Connection timeout in seconds
+        "application_name": "model_catalog_service"
+    }
+)
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 

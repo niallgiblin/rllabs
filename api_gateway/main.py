@@ -92,6 +92,15 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# Add Prometheus metrics
+try:
+    from prometheus_fastapi_instrumentator import Instrumentator
+    instrumentator = Instrumentator()
+    instrumentator.instrument(app).expose(app)
+    logger.info("Prometheus metrics enabled")
+except ImportError:
+    logger.warning("prometheus-fastapi-instrumentator not available - metrics disabled")
+
 # Include routers
 app.include_router(internal_router, prefix="/internal", tags=["internal"])
 

@@ -1,3 +1,13 @@
+# NOTE: This Job is a fallback option for database initialization.
+# The standard approach is to use the ConfigMap-mounted init script in postgres.yml,
+# which runs automatically on first container startup (when data directory is empty).
+# Use this Job only if:
+#   1. You have an existing PersistentVolume with data and need to add databases
+#   2. The init script didn't run for some reason
+#   3. You need to initialize databases after the postgres pod is already running
+#
+# For new deployments, the ConfigMap approach in postgres.yml is preferred.
+---
 apiVersion: batch/v1
 kind: Job
 metadata:
