@@ -678,6 +678,84 @@ async def register_with_model_catalog(
             raise Exception(f"Model Catalog unavailable: {str(e)}")
 
 
+@app.post("/training-jobs", status_code=202, tags=["Training"])
+async def trigger_training_job(
+    config_artifact_id: str,
+    dataset_artifact_id: str,
+    model_artifact_id: str,
+    user_id: str = Header(..., alias="X-User-Id")
+):
+    """
+    Trigger a training job by publishing to RabbitMQ
+    
+    Args:
+        config_artifact_id: SHA256 hash of training config JSON
+        dataset_artifact_id: SHA256 hash of dataset config JSON
+        model_artifact_id: SHA256 hash of model weights .pth file
+        user_id: User ID from API Gateway
+    
+    Returns:
+        Job ID and status
+    """
+    import uuid
+    job_id = f"job-{uuid.uuid4()}"
+    
+    logger.info(f"User {user_id} triggering training job {job_id}")
+    
+    try:
+        # Verify all artifacts exist before queuing
+        storage = StorageService(
+            endpoint=MINIO_ENDPOINT,
+            access_key=MINIO_ACCESS_KEY,
+            secret_key=MINIO_SECRET_KEY,
+            bucket=MINIO_BUCKET,
+            use_ssl=MINIO_USE_SSL
+        )
+        
+        for artifact_id in [config_artifact_id, dataset_artifact_id, model_artifact_id]:
+            info = await storage.get_object_info(artifact_id)
+            if not info:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Artifact {artifact_id} not found"
+                )
+        
+        # Publish to RabbitMQ
+        publisher = get_event_publisher()
+        if not publisher:
+            raise HTTPException(
+                status_code=503,
+                detail="Event publisher not available"
+            )
+        
+        message = {
+            "job_id": job_id,
+            "config_artifact_id": config_artifact_id,
+            "dataset_artifact_id": dataset_artifact_id,
+            "model_artifact_id": model_artifact_id,
+            "user_id": user_id
+        }
+        
+        # You'll need to add this method to event_publisher.py
+        publisher.publish_training_job(message)
+        
+        logger.info(f"Training job {job_id} queued successfully")
+        
+        return {
+            "job_id": job_id,
+            "status": "queued",
+            "message": "Training job has been queued for processing"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error triggering training job: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to trigger training job: {str(e)}"
+        )
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
