@@ -101,3 +101,46 @@ class DownloadResponse(BaseModel):
     expires_at: str = Field(..., description="ISO timestamp when URL expires")
     file_size: int = Field(..., description="File size in bytes")
     filename: str = Field(..., description="Filename for download")
+
+
+class TrainingJobRequest(BaseModel):
+    """
+    Request to trigger a training job
+    
+    All artifacts must exist in MinIO before the job can be queued.
+    The service will verify artifact existence before publishing to RabbitMQ.
+    
+    If model_id is provided, trained weights will be associated with that model.
+    If not provided, model_id will be inferred from the model artifact's upload history.
+    """
+    config_artifact_id: str = Field(
+        ..., 
+        description="SHA256 hash of training config JSON (dqn_config)",
+        example="sha256:abc123..."
+    )
+    dataset_artifact_id: str = Field(
+        ..., 
+        description="SHA256 hash of dataset config JSON (grid_params/maze config)",
+        example="sha256:def456..."
+    )
+    model_artifact_id: str = Field(
+        ..., 
+        description="SHA256 hash of pre-trained model weights .pth file",
+        example="sha256:ghi789..."
+    )
+    model_id: Optional[int] = Field(
+        None,
+        description="Model ID to associate trained weights with. If not provided, will be inferred from the model artifact's upload history."
+    )
+
+
+class TrainingJobResponse(BaseModel):
+    """
+    Response after triggering a training job
+    
+    The job has been queued for processing by the training service.
+    The training service will consume the job from RabbitMQ and process it asynchronously.
+    """
+    job_id: str = Field(..., description="Unique job identifier (UUID)")
+    status: str = Field(default="queued", description="Job status")
+    message: str = Field(..., description="Human-readable status message")

@@ -72,19 +72,25 @@ class EventPublisher:
                     host=self.rabbitmq_host,
                     port=self.rabbitmq_port,
                     credentials=credentials,
-                    heartbeat=600,  # Keep connection alive
+                    heartbeat=600,
                     blocked_connection_timeout=300
                 )
                 self._connection = pika.BlockingConnection(parameters)
                 self._channel = self._connection.channel()
                 
                 # Declare exchange for artifact events
-                # Topic exchange allows flexible routing (e.g., "artifact.*", "artifact.uploaded")
                 self._channel.exchange_declare(
                     exchange='artifact_events',
                     exchange_type='topic',
-                    durable=True  # Survives broker restart
+                    durable=True
                 )
+                
+                # Declare queue for training jobs
+                self._channel.queue_declare(
+                    queue='training_jobs',
+                    durable=True
+                )
+                
                 logger.info("✓ Connected to RabbitMQ")
                 
             except Exception as e:
@@ -197,6 +203,33 @@ class EventPublisher:
         if self._connection and not self._connection.is_closed:
             self._connection.close()
             logger.info("Closed RabbitMQ connection")
+
+    def publish_training_job(self, message: dict):
+        """
+        Publish a training job message to RabbitMQ
+        """
+        try:
+            self._ensure_connection() 
+            
+            if self._channel is None:  
+                logger.warning("RabbitMQ not available, training job not published")
+                raise Exception("RabbitMQ channel not available")
+            
+            self._channel.basic_publish(  
+                exchange='',
+                routing_key='training_jobs',  
+                body=json.dumps(message),
+                properties=pika.BasicProperties(
+                    delivery_mode=2,  
+                    content_type='application/json'
+                )
+            )
+            logger.info(f"Published training job: {message['job_id']}")
+        except Exception as e:
+            logger.error(f"Failed to publish training job: {e}")
+            raise
+
+
 
 
 # Global event publisher instance (singleton pattern)

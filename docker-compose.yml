@@ -86,6 +86,30 @@ services:
     volumes:
       - ./upload_download_service:/app
 
+  # Training Service
+  model-train-service:
+    build:
+      context: ./model_train_service
+    container_name: model-train-service
+    environment:
+      # Upload/Download Service URL for downloading artifacts
+      - UPLOAD_DOWNLOAD_SERVICE_URL=http://upload-download-service:8002
+      # RabbitMQ Configuration
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_PORT=5672
+      - RABBITMQ_USER=admin
+      - RABBITMQ_PASS=admin_password
+      - RABBITMQ_QUEUE=training_jobs
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      upload-download-service:
+        condition: service_started
+    networks:
+      - rllabs-network
+    volumes:
+      - ./model_train_service:/app
+
   # PostgreSQL Database for Model Catalog Service (Metadata)
   postgres:
     image: postgres:13

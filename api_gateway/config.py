@@ -20,10 +20,12 @@ class Settings(BaseSettings):
         
         # Model Catalog Service
         "/api/models": "http://model-catalog-service:8000",
+        "/api/versions": "http://model-catalog-service:8000",
         
+        # Training Jobs (handled by Upload/Download Service)
+        "/api/training-jobs": "http://upload-download-service:8002",
+
         # Future services (commented out until implemented)
-        # "/api/training": "http://training-service:8003",
-        # "/api/mazes": "http://maze-service:8004",
         # "/api/comments": "http://comment-service:8005",
     }
     

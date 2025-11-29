@@ -1,0 +1,16 @@
+{
+  "grid_height": 10,
+  "grid_width": 10,
+  "channels": [
+    [5, 5],
+    [9, 9],
+    [
+      [0, 0],
+      [1, 1],
+      [2, 2]
+    ]
+  ],
+  "initial_epsilon_value": 0.9,
+  "initial_learning_rate": 0.001,
+  "initial_gamma_value": 0.95
+}
