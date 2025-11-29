@@ -15,8 +15,8 @@ from datetime import datetime, timedelta, timezone
 import jwt
 
 GATEWAY_URL = "http://localhost:8080"
-CATALOG_DIRECT_URL = "http://localhost:8001"
-UPLOAD_DOWNLOAD_DIRECT_URL = "http://localhost:8081"
+CATALOG_DIRECT_URL = "http://localhost:8001"  # Only for health checks
+UPLOAD_DOWNLOAD_DIRECT_URL = "http://localhost:8002"  # Only for health checks
 RABBITMQ_HOST = "localhost"
 RABBITMQ_PORT = 5672
 RABBITMQ_USER = "admin"
@@ -75,9 +75,9 @@ def test_model_id(auth_headers):
     # Fallback: try direct catalog service
     try:
         response = requests.post(
-            f"{CATALOG_DIRECT_URL}/models",
+            f"{GATEWAY_URL}/api/models",
             json={"name": unique_name, "description": "Test model"},
-            headers={"X-User-Id": "test-user"},
+            headers={"Authorization": f"Bearer {_make_jwt(sub='test-user')}"},
             timeout=5
         )
         if response.status_code == 201:
@@ -410,9 +410,9 @@ def test_event_consumer_graceful_degradation():
         # Model creation should still work
         unique_name = f"degradation-test-{int(time.time())}"
         response = requests.post(
-            f"{CATALOG_DIRECT_URL}/models",
+            f"{GATEWAY_URL}/api/models",
             json={"name": unique_name, "description": "Test"},
-            headers={"X-User-Id": "test-user"},
+            headers={"Authorization": f"Bearer {_make_jwt(sub='test-user')}"},
             timeout=5
         )
         

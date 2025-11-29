@@ -14,7 +14,8 @@ import pytest
 import requests
 
 GATEWAY_URL = "http://localhost:8080"
-CATALOG_DIRECT_URL = "http://localhost:8001"
+GATEWAY_URL = "http://localhost:8080"
+CATALOG_DIRECT_URL = "http://localhost:8001"  # Only for health checks
 RABBITMQ_HOST = "localhost"
 RABBITMQ_PORT = 5672
 RABBITMQ_USER = "admin"
@@ -40,7 +41,7 @@ def wait_for_services():
     for _ in range(30):
         try:
             if requests.get(f"{GATEWAY_URL}/health", timeout=3).status_code == 200 and \
-               requests.get(f"{CATALOG_DIRECT_URL}/health", timeout=3).status_code == 200:
+                requests.get(f"{GATEWAY_URL}/health", timeout=3).status_code == 200:
                 return
         except Exception:
             pass
@@ -49,7 +50,7 @@ def wait_for_services():
 
 def test_connectivity():
     assert requests.get(f"{GATEWAY_URL}/health").status_code == 200
-    assert requests.get(f"{CATALOG_DIRECT_URL}/health").status_code == 200
+    assert requests.get(f"{GATEWAY_URL}/health").status_code == 200
 
 def test_protected_without_auth_is_401():
     """Test that protected write operations require authentication"""
@@ -170,10 +171,13 @@ def test_model_created_event_published():
     # If gateway fails, try direct catalog service (event publishing happens in catalog)
     if not create_response or create_response.status_code != 201:
         try:
+            # Use gateway with JWT token
+            token = _make_jwt(sub="it-test-user")
+            headers = {"Authorization": f"Bearer {token}"}
             create_response = requests.post(
-                f"{CATALOG_DIRECT_URL}/models",
+                f"{GATEWAY_URL}/api/models",
                 json={"name": unique_name, "description": "Event test model"},
-                headers={"X-User-Id": "it-test-user"},
+                headers=headers,
                 timeout=5
             )
         except Exception:
@@ -219,9 +223,9 @@ def test_rabbitmq_graceful_degradation():
     unique_name = f"degradation-test-{int(time.time())}-{os.urandom(2).hex()}"
     
     create_response = requests.post(
-        f"{CATALOG_DIRECT_URL}/models",
+        f"{GATEWAY_URL}/api/models",
         json={"name": unique_name, "description": "Degradation test"},
-        headers={"X-User-Id": "test-user"}
+        headers=headers
     )
     
     # Should succeed even if RabbitMQ is down

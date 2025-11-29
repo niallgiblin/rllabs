@@ -54,8 +54,13 @@ except (ImportError, Exception) as e:
         # Fallback routing logic - should match config.py SERVICES dict
         # This is used only if proxy import fails
         # Check more specific routes first
-        if path.startswith("/api/versions"):
+        # Special case: model comments go to collaboration service
+        if "/comments" in path and path.startswith("/api/models/"):
+            return "http://collaboration-service:8000"
+        elif path.startswith("/api/versions"):
             return "http://model-catalog-service:8000"
+        elif path.startswith("/api/comments"):
+            return "http://collaboration-service:8000"
         elif path.startswith("/api/models"):
             return "http://model-catalog-service:8000"
         elif path.startswith("/api/uploads"):
@@ -234,6 +239,9 @@ async def proxy_to_service(
     elif path.startswith("downloads") and request.method == "DELETE":
         # Delete operations on downloads require auth
         requires_auth = True
+    elif path.startswith("models/") and "/ownership" in path:
+        # Ownership endpoint requires auth even for GET
+        requires_auth = True
     # GET /api/models* and GET /api/downloads* are public (no auth required)
     
     # Check authentication if required
@@ -249,8 +257,12 @@ async def proxy_to_service(
         scopes = current_user.get("scopes", [])
         scope = " ".join(scopes) if isinstance(scopes, list) else str(scopes)
     else:
-        # Public endpoint - use IP for rate limiting
-        user_id = None
+        # Public endpoint - but still extract user_id if JWT is provided (for X-User-Id forwarding)
+        # This allows endpoints like /ownership to work even if not explicitly requiring auth
+        if current_user is not None:
+            user_id = current_user.get("user_id", None)
+        else:
+            user_id = None
         client_id = request.client.host if request.client else "unknown"
         scopes = []
         scope = ""

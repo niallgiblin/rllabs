@@ -18,15 +18,15 @@ class Settings(BaseSettings):
         "/api/uploads": "http://upload-download-service:8002",
         "/api/downloads": "http://upload-download-service:8002",
         
+        # Collaboration Service (comments)
+        "/api/comments": "http://collaboration-service:8000",
+        
         # Model Catalog Service
         "/api/models": "http://model-catalog-service:8000",
         "/api/versions": "http://model-catalog-service:8000",
         
         # Training Jobs (handled by Upload/Download Service)
         "/api/training-jobs": "http://upload-download-service:8002",
-
-        # Future services (commented out until implemented)
-        # "/api/comments": "http://comment-service:8005",
     }
     
     # Rate Limiting

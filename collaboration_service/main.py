@@ -1,4 +1,6 @@
 from fastapi import FastAPI, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from datetime import datetime
 from bson import ObjectId
 import json
@@ -43,7 +45,7 @@ def startup():
 
 
 
-@app.post("/api/models/{model_id}/comments", status_code=status.HTTP_201_CREATED)
+@app.post("/models/{model_id}/comments", status_code=status.HTTP_201_CREATED)
 def create_comment(model_id: str, comment: CommentCreate):
     """
     Optimistic accept --> Trust frontend, no validation
@@ -84,7 +86,7 @@ def create_comment(model_id: str, comment: CommentCreate):
 
 
 
-@app.get("/api/models/{model_id}/comments")
+@app.get("/models/{model_id}/comments")
 def get_comments(model_id: str, page: int = 1, limit: int = 50):
     """
     Get all comments for a model as nested tree
@@ -130,7 +132,7 @@ def get_comments(model_id: str, page: int = 1, limit: int = 50):
 
 
 
-@app.get("/api/comments/{comment_id}")
+@app.get("/comments/{comment_id}")
 def get_comment(comment_id: str):
     """
     Get specific comment
@@ -151,7 +153,7 @@ def get_comment(comment_id: str):
 
 
 
-@app.put("/api/comments/{comment_id}")
+@app.put("/comments/{comment_id}")
 def update_comment(comment_id: str, update: CommentUpdate):
     """
     Update comment content
@@ -187,7 +189,7 @@ def update_comment(comment_id: str, update: CommentUpdate):
 
 
 
-@app.delete("/api/comments/{comment_id}")
+@app.delete("/comments/{comment_id}")
 def delete_comment(comment_id: str):
     """
     Delete comment and ALL its descendants recursively

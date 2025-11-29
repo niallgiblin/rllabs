@@ -12,6 +12,7 @@ services:
       - redis
       - model-catalog-service
       - upload-download-service
+      - collaboration-service
     networks:
       - rllabs-network
 
@@ -220,6 +221,82 @@ services:
       exit 0;
       "
 
+  # MongoDB Replica Set for Collaboration Service (CP Configuration)
+  mongo1:
+    image: mongo:7.0
+    container_name: mongo1
+    command: ["--replSet", "rs0", "--bind_ip_all", "--port", "27017"]
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo1_data:/data/db
+      - mongo1_config:/data/configdb
+    networks:
+      - rllabs-network
+    healthcheck:
+      test: echo "try { rs.status() } catch (err) { rs.initiate({_id:'rs0',members:[{_id:0,host:'mongo1:27017',priority:1},{_id:1,host:'mongo2:27018',priority:0.5},{_id:2,host:'mongo3:27019',priority:0.5}]}) }" | mongosh --port 27017 --quiet
+      interval: 5s
+      timeout: 30s
+      start_period: 0s
+      start_interval: 1s
+      retries: 30
+
+  mongo2:
+    image: mongo:7.0
+    container_name: mongo2
+    command: ["--replSet", "rs0", "--bind_ip_all", "--port", "27018"]
+    ports:
+      - "27018:27018"
+    volumes:
+      - mongo2_data:/data/db
+      - mongo2_config:/data/configdb
+    networks:
+      - rllabs-network
+    depends_on:
+      - mongo1
+
+  mongo3:
+    image: mongo:7.0
+    container_name: mongo3
+    command: ["--replSet", "rs0", "--bind_ip_all", "--port", "27019"]
+    ports:
+      - "27019:27019"
+    volumes:
+      - mongo3_data:/data/db
+      - mongo3_config:/data/configdb
+    networks:
+      - rllabs-network
+    depends_on:
+      - mongo1
+
+  # Collaboration Service
+  collaboration-service:
+    build:
+      context: ./collaboration_service
+    container_name: collaboration-service
+    ports:
+      - "8004:8000"
+    environment:
+      - MONGO_URI=mongodb://mongo1:27017,mongo2:27018,mongo3:27019/?replicaSet=rs0
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - RABBITMQ_HOST=rabbitmq
+      - RABBITMQ_PORT=5672
+      - RABBITMQ_USER=admin
+      - RABBITMQ_PASS=admin_password
+      - MODEL_CATALOG_URL=http://model-catalog-service:8000
+    depends_on:
+      mongo1:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - rllabs-network
+    volumes:
+      - ./collaboration_service:/app
+
 networks:
   rllabs-network:
     driver: bridge
@@ -227,3 +304,9 @@ networks:
 volumes:
   postgres_data:
   minio_data:
+  mongo1_data:
+  mongo2_data:
+  mongo3_data:
+  mongo1_config:
+  mongo2_config:
+  mongo3_config:

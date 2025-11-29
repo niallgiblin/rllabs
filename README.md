@@ -59,6 +59,16 @@ RLLabs is designed as a microservices architecture where specialized services ha
 - Integrated with Upload/Download Service for artifact management
 - Automatic model versioning after training completion
 
+**Collaboration Service** (Port 8004)
+
+- Model comments and threaded discussions
+- MongoDB replica set for CP (Consistency + Partition Tolerance) configuration
+- Redis caching for comment queries
+- Event-driven integration with Model Catalog (listens to ModelCreated/ModelDeleted events)
+- Creator badge detection for comment authors
+- Nested comment threads with pagination
+- Automatic comment archiving when models are deleted
+
 ### Supporting Infrastructure
 
 **PostgreSQL** (Port 5432)
@@ -66,10 +76,18 @@ RLLabs is designed as a microservices architecture where specialized services ha
 - Primary database for Model Catalog metadata
 - Stores model definitions, versions, and relationships
 
+**MongoDB Replica Set** (Ports 27017/27018/27019)
+
+- 3-node replica set (rs0) for Collaboration Service
+- CP (Consistency + Partition Tolerance) configuration
+- Write concern "majority" for consistency
+- Read preference "secondary preferred" for high availability
+
 **Redis** (Port 6379)
 
 - Rate limiting and caching layer
 - Session management and distributed locking
+- Comment caching for Collaboration Service
 
 **RabbitMQ** (Ports 5672/15672)
 
@@ -83,14 +101,6 @@ RLLabs is designed as a microservices architecture where specialized services ha
 - S3-compatible object storage
 - Stores model files as artifacts
 - Single bucket `rllabs-artifacts` for all model files
-
-### Planned Services 
-
-**Collaboration Service**
-
-- Model version comments and discussions
-- MongoDB-backed threaded conversations
-- @mentions and notifications
 
 ## Current Implementation Status
 
@@ -153,11 +163,22 @@ RLLabs is designed as a microservices architecture where specialized services ha
 - Automatic model version registration after training
 - User-scoped artifact downloads with proper authorization
 
+**Collaboration Service**
+
+- RESTful API for model comments (GET, POST, PUT, DELETE)
+- MongoDB replica set with CP configuration (write concern "majority")
+- Redis caching for comment queries (5-minute TTL)
+- Event consumer listening to `model_events` exchange (ModelCreated, ModelDeleted)
+- Automatic creator badge detection for comment authors
+- Nested comment threads with recursive deletion
+- Comment archiving on model deletion
+
 **Integration**
 
 - Gateway → Catalog authentication flow
 - Gateway → Upload/Download Service authentication flow
 - Gateway → Training Jobs endpoint (POST `/api/training-jobs`)
+- Gateway → Collaboration Service (comments endpoints)
 - **Public Catalog Browsing**: GET `/api/models*` endpoints are public (no auth required)
 - **Protected Write Operations**: POST/PUT/DELETE operations require valid JWT
 - Public routes (`/public/*`) open for discovery
@@ -166,6 +187,7 @@ RLLabs is designed as a microservices architecture where specialized services ha
 - **RBAC Integration**: Cross-service permission checks (Upload/Download → Model Catalog)
 - **Async Messaging**: Model and artifact lifecycle events via RabbitMQ
 - **Training Job Flow**: Upload/Download Service → RabbitMQ → Training Service → MinIO → Model Catalog
+- **Collaboration Flow**: Model Catalog → RabbitMQ → Collaboration Service (event-driven model metadata caching)
 - **Event-Driven Workflows**: Artifact uploads auto-register as model versions
 - **Fault Tolerance**: Circuit breakers, retry with exponential backoff
 - **Security**: Authorization at application layer, direct client-to-MinIO transfers for performance
@@ -205,7 +227,9 @@ This starts:
 - Model Catalog on http://localhost:8001
 - Upload/Download Service on http://localhost:8002
 - Training Service (RabbitMQ consumer, no HTTP port)
+- Collaboration Service on http://localhost:8004
 - PostgreSQL on localhost:5432
+- MongoDB Replica Set on localhost:27017/27018/27019
 - Redis on localhost:6379
 - RabbitMQ on localhost:5672 (management UI: :15672)
 - MinIO on http://localhost:9000 (console: :9001)
@@ -216,6 +240,7 @@ This starts:
 curl http://localhost:8080/health  # Gateway
 curl http://localhost:8001/health  # Catalog
 curl http://localhost:8002/health  # Upload/Download Service
+curl http://localhost:8004/health  # Collaboration Service (if health endpoint exists)
 # Training Service doesn't expose HTTP endpoint (RabbitMQ consumer only)
 ```
 
@@ -241,13 +266,30 @@ Ensure all services are running via Docker Compose:
 docker compose up -d
 ```
 
+**Test Architecture:**
+All tests are integrated with the API Gateway and use JWT authentication. Tests route through `http://localhost:8080/api/*` endpoints, ensuring:
+- ✅ Centralized authentication and authorization
+- ✅ Consistent rate limiting
+- ✅ Proper user context forwarding (`X-User-Id` header)
+- ✅ Fault tolerance through circuit breakers
+- ✅ End-to-end validation of the gateway integration
+
+**Test Status:**
+✅ **All 131 tests passing** - Comprehensive test coverage across all services
+
 **Unit Tests (Catalog Service)**
 
 ```bash
 pytest tests/test_catalog_service.py -v
 ```
 
-Tests model CRUD operations, versioning, and error handling.
+Tests model CRUD operations, versioning, and error handling through the API Gateway:
+- Model creation, retrieval, and deletion
+- Version registration and latest version queries
+- Ownership endpoint for RBAC checks
+- Public browsing (no auth required for GET)
+- Admin delete functionality
+- All requests go through `/api/models` via gateway
 
 **Gateway Tests**
 
@@ -261,6 +303,7 @@ Tests JWT authentication, protected routes, public routes, and rate limiting:
 - Protected write operations (POST/DELETE require auth)
 - IP-based rate limiting for unauthenticated users
 - User-based rate limiting for authenticated users
+- Token validation and error handling
 
 **Integration Tests**
 
@@ -275,6 +318,7 @@ Tests full workflows including:
 - RabbitMQ connectivity
 - Event publishing (ModelCreated events)
 - Graceful degradation when RabbitMQ is unavailable
+- All API calls routed through gateway
 
 **Upload/Download Service Tests**
 
@@ -282,21 +326,40 @@ Tests full workflows including:
 pytest tests/test_upload_download_service.py -v
 ```
 
-Tests Upload/Download Service integration:
+Tests Upload/Download Service integration through the gateway:
 
 - Gateway routing for `/api/uploads` and `/api/downloads`
 - JWT authentication enforcement (required for uploads, optional for downloads)
-- User ID header forwarding (X-User-Id)
+- User ID header forwarding (X-User-Id) from gateway
 - Upload session creation, completion, and abortion
 - Multipart upload with presigned URLs
 - Content-addressed storage and deduplication
 - **RBAC Authorization**:
-  - Public downloads (no auth required)
+  - Public downloads (no auth required - unauthenticated only)
   - Owner-based and model-level permission checks for authenticated users
+  - Authenticated non-owners receive 403 Forbidden
 - Download authorization and presigned URL generation
 - RabbitMQ event publishing (ArtifactCommitted events)
 - Graceful degradation when RabbitMQ is unavailable
 - End-to-end upload workflow
+
+**Training Flow Tests**
+
+```bash
+pytest tests/test_training_flow.py -v
+```
+
+Tests complete training workflow:
+
+- Model creation via gateway
+- Artifact uploads (config, dataset, weights)
+- Training job triggering through gateway
+- Training execution and monitoring
+- Trained weights upload and version registration
+- Download of trained models
+- Multiple training runs (versioning)
+- Error handling scenarios
+- Model catalog queries
 
 **RBAC Authorization Tests**
 
@@ -304,16 +367,33 @@ Tests Upload/Download Service integration:
 pytest tests/test_rbac_authorization.py -v
 ```
 
-Tests comprehensive RBAC authorization:
+Tests comprehensive RBAC authorization through the gateway:
 
-- Model Catalog ownership endpoint
+- Model Catalog ownership endpoint (via `/api/models/{id}/ownership`)
 - Upload/Download Service authorization checks
 - Owner access (positive cases)
-- Non-owner denial (403 Forbidden)
+- Non-owner denial (403 Forbidden) for authenticated users
+- Public downloads (unauthenticated access allowed)
 - Model-level permission checks
 - Cross-service permission queries
-- Error handling (404, 400, 422, 403)
+- Error handling (404, 400, 401, 403)
 - Edge cases and concurrent requests
+
+**Collaboration Service Tests**
+
+```bash
+pytest tests/test_collaboration_service.py -v
+```
+
+Tests collaboration features through the gateway:
+
+- Comment CRUD operations (via `/api/models/{id}/comments`)
+- Nested comment threads
+- Creator badge detection
+- Event-driven integration (ModelCreated/ModelDeleted)
+- Redis caching behavior
+- Error handling scenarios
+- API Gateway routing verification
 
 **Admin Delete Tests**
 
@@ -328,9 +408,9 @@ pytest tests/test_upload_download_service.py::test_delete_artifact_* -v
 Tests admin and owner delete functionality:
 
 - Owner can delete their models/artifacts
-- Admin can delete any model/artifact
+- Admin can delete any model/artifact (with `api:admin` scope)
 - Non-owner non-admin cannot delete
-- Error handling (404, 403, 422)
+- Error handling (404, 403, 401)
 
 **RabbitMQ Event Testing**
 The integration tests verify async messaging:
@@ -351,6 +431,7 @@ Tests event consumer functionality:
 - Model Catalog event consumer listening to artifact events
 - Auto-registration of model versions from artifact uploads
 - Error handling and reconnection logic
+- All model creation goes through gateway
 
 **All Tests**
 
@@ -358,7 +439,7 @@ Tests event consumer functionality:
 pytest tests/ -v
 ```
 
-Runs all tests across gateway, catalog, integration, and upload/download suites.
+Runs all 131 tests across gateway, catalog, integration, upload/download, training, collaboration, and RBAC suites. All tests use the API Gateway for consistent authentication and routing.
 
 **Test Dependencies:**
 Install all test dependencies:
@@ -366,6 +447,16 @@ Install all test dependencies:
 ```bash
 pip install -r tests/requirements.txt
 ```
+
+**Test Coverage Summary:**
+- ✅ API Gateway: Authentication, routing, rate limiting
+- ✅ Model Catalog: CRUD, versioning, ownership, events
+- ✅ Upload/Download: Multipart uploads, RBAC, presigned URLs
+- ✅ Training Service: End-to-end training workflow
+- ✅ Collaboration Service: Comments, threads, events
+- ✅ RBAC: Authorization across all services
+- ✅ Integration: Cross-service workflows
+- ✅ Event System: RabbitMQ messaging
 
 ## API Usage
 
@@ -644,6 +735,116 @@ curl http://localhost:8080/api/models/{model_id}/versions
 # Get latest version (should be the newly trained one)
 curl http://localhost:8080/api/models/{model_id}/latest
 ```
+
+### Collaboration Service (Comments)
+
+**Create a Comment on a Model:**
+
+```bash
+curl -X POST http://localhost:8080/api/models/{model_id}/comments \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "content": "Great model! How did you tune the hyperparameters?",
+    "authorId": "user-123",
+    "authorName": "Alice",
+    "parentId": null
+  }'
+```
+
+Response:
+
+```json
+{
+  "id": "507f1f77bcf86cd799439011",
+  "modelId": "1",
+  "content": "Great model! How did you tune the hyperparameters?",
+  "authorId": "user-123",
+  "authorName": "Alice",
+  "isCreator": false,
+  "parentId": null,
+  "createdAt": "2024-01-01T12:00:00Z",
+  "updatedAt": "2024-01-01T12:00:00Z",
+  "replies": []
+}
+```
+
+**Reply to a Comment:**
+
+```bash
+curl -X POST http://localhost:8080/api/models/{model_id}/comments \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "content": "I used grid search with learning rate 0.001",
+    "authorId": "user-456",
+    "authorName": "Bob",
+    "parentId": "507f1f77bcf86cd799439011"
+  }'
+```
+
+**Get Comments for a Model:**
+
+```bash
+# Get paginated comments (nested tree structure)
+curl http://localhost:8080/api/models/{model_id}/comments?page=1&limit=50
+```
+
+Response:
+
+```json
+{
+  "data": [
+    {
+      "id": "507f1f77bcf86cd799439011",
+      "content": "Great model!",
+      "authorId": "user-123",
+      "authorName": "Alice",
+      "isCreator": false,
+      "replies": [
+        {
+          "id": "507f1f77bcf86cd799439012",
+          "content": "I used grid search...",
+          "authorId": "user-456",
+          "authorName": "Bob",
+          "replies": []
+        }
+      ]
+    }
+  ],
+  "pagination": {
+    "page": 1,
+    "limit": 50,
+    "total": 1,
+    "hasMore": false
+  }
+}
+```
+
+**Update a Comment:**
+
+```bash
+curl -X PUT http://localhost:8080/api/comments/{comment_id} \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "content": "Updated comment content"
+  }'
+```
+
+**Delete a Comment (and all replies):**
+
+```bash
+curl -X DELETE http://localhost:8080/api/comments/{comment_id} \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+```
+
+**Features:**
+- Nested comment threads (replies to replies)
+- Creator badge detection (automatically marks model creator's comments)
+- Automatic comment archiving when models are deleted
+- Redis caching (5-minute TTL) for performance
+- Pagination on top-level comments
 
 ### Public Model Discovery
 
@@ -933,12 +1134,12 @@ Model Catalog → Publish ModelCreated event
                 ↓
          RabbitMQ Exchange (model_events)
                 ↓
-         Queue Bindings (model.created)
+         Queue Bindings (model.created, model.deleted)
                 ↓
-         Future Consumers:
-         - Collaboration Service (cache model metadata)
-         - Notification Service (notify subscribers)
-         - Audit Service (log model lifecycle)
+         Consumers:
+         - Collaboration Service (cache model metadata, archive comments)
+         - Future: Notification Service (notify subscribers)
+         - Future: Audit Service (log model lifecycle)
 ```
 
 **Implemented Events:**
@@ -1045,6 +1246,23 @@ Services include ConfigMaps, Secrets, Deployments, Services, and Ingress resourc
 - `RABBITMQ_PASS`: RabbitMQ password (default: `admin_password`)
 - `RABBITMQ_QUEUE`: Queue name for training jobs (default: `training_jobs`)
 - `NUM_EPISODES`: Number of training episodes (default: `50`)
+
+**Collaboration Service**
+
+- `MONGO_URI`: MongoDB connection string with replica set (default: `mongodb://mongo1:27017,mongo2:27018,mongo3:27019/?replicaSet=rs0`)
+- `REDIS_HOST`: Redis host for caching (default: `redis`)
+- `REDIS_PORT`: Redis port (default: `6379`)
+- `RABBITMQ_HOST`: RabbitMQ connection host (default: `rabbitmq`)
+- `RABBITMQ_PORT`: RabbitMQ port (default: `5672`)
+- `RABBITMQ_USER`: RabbitMQ username (default: `admin`)
+- `RABBITMQ_PASS`: RabbitMQ password (default: `admin_password`)
+- `MODEL_CATALOG_URL`: Model Catalog Service URL for fallback queries (default: `http://model-catalog-service:8000`)
+
+**MongoDB**
+
+- Replica set `rs0` with 3 nodes (mongo1, mongo2, mongo3)
+- Automatic replica set initialization on startup
+- CP (Consistency + Partition Tolerance) configuration
 
 **MinIO**
 

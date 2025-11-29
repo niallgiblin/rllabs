@@ -158,7 +158,13 @@ async def _make_request(target_url: str, headers: dict, body: bytes, method: str
 def get_target_service(path: str) -> Optional[str]:
     """
     Determine which backend service to route to based on path
+    Special handling: /api/models/{id}/comments routes to collaboration service
     """
+    # Special case: model comments go to collaboration service
+    if "/comments" in path and path.startswith("/api/models/"):
+        return "http://collaboration-service:8000"
+    
+    # Standard routing: match by prefix
     for route_prefix, service_url in settings.SERVICES.items():
         if path.startswith(route_prefix):
             return service_url
