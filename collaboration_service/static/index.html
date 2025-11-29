@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Maze Model Collaboration</title>
+    <link rel="stylesheet" href="styles.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+
+    <div class="simulation-bar">
+        <div class="sim-group">
+            <label>Current Model ID:</label>
+            <input type="text" id="simModelId" value="maze-001">
+        </div>
+        <div class="sim-group">
+            <label>Your User ID:</label>
+            <input type="text" id="simUserId" value="user_123">
+        </div>
+        <div class="sim-group">
+            <label>Your Name:</label>
+            <input type="text" id="simUserName" value="Alice Researcher">
+        </div>
+        <button onclick="reloadContext()" class="btn-secondary">Load Context</button>
+    </div>
+
+    <div class="container">
+        <div class="model-viewer">
+            <div class="model-placeholder">
+                <h3>Maze Structure #42</h3>
+                <p>Interactive 3D Model Viewer would be here.</p>
+                <div class="cube"></div>
+            </div>
+        </div>
+
+        <div class="collaboration-section">
+            <div class="section-header">
+                <h2>Discussion</h2>
+                <span class="badge count-badge" id="commentCount">0 comments</span>
+            </div>
+
+            <div class="comment-input-area">
+                <textarea id="mainCommentInput" placeholder="Add a comment about this model..."></textarea>
+                <div class="action-row">
+                    <button onclick="postComment()" class="btn-primary">Post Comment</button>
+                </div>
+            </div>
+
+            <div id="commentsList" class="comments-list">
+                <div class="loading">Loading discussions...</div>
+            </div>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
