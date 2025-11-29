@@ -1,12 +1,26 @@
 import torch
 import torch.nn as nn
 import random
+import logging
 from model_brain import ModelBrain
+
+logger = logging.getLogger(__name__)
 
 class Agent:
     def __init__(self, grid_params, dqn_config, model_weights_path):
         self.model = ModelBrain(dqn_config)
-        self.model.load_state_dict(torch.load(model_weights_path))
+        # Try to load weights, but allow training from scratch if weights don't match
+        try:
+            state_dict = torch.load(model_weights_path)
+            missing_keys, unexpected_keys = self.model.load_state_dict(state_dict, strict=False)
+            if missing_keys or unexpected_keys:
+                logger.warning(f"Weight mismatch - missing: {missing_keys}, unexpected: {unexpected_keys}")
+                logger.info("Training from scratch with random initialization (weights don't match)")
+            else:
+                logger.info(f"Successfully loaded weights from {model_weights_path}")
+        except Exception as e:
+            logger.warning(f"Could not load weights from {model_weights_path}: {e}")
+            logger.info("Training from scratch with random initialization")
         self.grid_params = grid_params
         self.H = grid_params["grid_height"]
         self.W = grid_params["grid_width"]
@@ -109,7 +123,16 @@ class Agent:
 
             self.epsilon = max(0.1, self.epsilon * 0.999)
 
-            print(f"Episode {episode+1} | Total Reward: {total_reward:.2f} | Epsilon: {self.epsilon:.2f}")
+            logger.info(f"Episode {episode+1}/{num_episodes} | Total Reward: {total_reward:.2f} | Epsilon: {self.epsilon:.2f}")
 
+    def save_weights(self, filepath: str):
+        """
+        Save the trained model weights to a file
+        
+        Args:
+            filepath: Path where to save the model weights (.pth file)
+        """
+        torch.save(self.model.state_dict(), filepath)
+        logger.info(f"Model weights saved to {filepath}")
 
         

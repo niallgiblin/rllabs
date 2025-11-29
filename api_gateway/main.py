@@ -53,11 +53,16 @@ except (ImportError, Exception) as e:
     def get_target_service(path: str) -> Optional[str]:
         # Fallback routing logic - should match config.py SERVICES dict
         # This is used only if proxy import fails
-        if path.startswith("/api/models"):
+        # Check more specific routes first
+        if path.startswith("/api/versions"):
+            return "http://model-catalog-service:8000"
+        elif path.startswith("/api/models"):
             return "http://model-catalog-service:8000"
         elif path.startswith("/api/uploads"):
             return "http://upload-download-service:8002"
         elif path.startswith("/api/downloads"):
+            return "http://upload-download-service:8002"
+        elif path.startswith("/api/training-jobs"):
             return "http://upload-download-service:8002" 
 
 # Placeholder for internal router if no mtls

@@ -85,6 +85,10 @@ def upload_file(filepath: Path, model_id: int, user_id: str = "test_user"):
             part_number = url_data["part_number"]
             url = url_data["url"]
             
+            # Replace Docker hostname with localhost for host machine access
+            # Presigned URLs use 'minio:9000' internally, but host machine needs 'localhost:9000'
+            url = url.replace("minio:9000", "localhost:9000")
+            
             # Read chunk
             chunk = f.read(chunk_size)
             if not chunk:
@@ -152,6 +156,9 @@ def download_file(artifact_id: str, output_path: Path = None, user_id: str = "te
     download_url = download_data["download_url"]
     file_size = download_data["file_size"]
     filename = download_data.get("filename", artifact_id)
+    
+    # Replace Docker hostname with localhost for host machine access
+    download_url = download_url.replace("minio:9000", "localhost:9000")
     
     print(f"--- Download URL obtained")
     

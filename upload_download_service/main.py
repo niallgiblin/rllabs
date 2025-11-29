@@ -29,7 +29,8 @@ from database import get_db, create_db_and_tables
 from models import (
     UploadInitRequest, UploadInitResponse, PresignedURL,
     UploadCompleteRequest, UploadCompleteResponse,
-    DownloadResponse, UploadPart
+    DownloadResponse, UploadPart,
+    TrainingJobRequest, TrainingJobResponse
 )
 from storage import StorageService
 from session_manager import SessionManager
@@ -678,24 +679,32 @@ async def register_with_model_catalog(
             raise Exception(f"Model Catalog unavailable: {str(e)}")
 
 
-@app.post("/training-jobs", status_code=202, tags=["Training"])
+@app.post("/training-jobs", response_model=TrainingJobResponse, status_code=202, tags=["Training"])
 async def trigger_training_job(
-    config_artifact_id: str,
-    dataset_artifact_id: str,
-    model_artifact_id: str,
+    request: TrainingJobRequest,
+    db: Session = Depends(get_db),
     user_id: str = Header(..., alias="X-User-Id")
 ):
     """
     Trigger a training job by publishing to RabbitMQ
     
+    This endpoint validates that all required artifacts exist in MinIO,
+    then publishes a training job message to RabbitMQ for asynchronous processing
+    by the training service.
+    
+    Flow:
+    1. Validate all artifacts exist in MinIO
+    2. Query database to get model_id from model artifact
+    3. Publish job message to RabbitMQ queue
+    4. Return job_id for tracking
+    
     Args:
-        config_artifact_id: SHA256 hash of training config JSON
-        dataset_artifact_id: SHA256 hash of dataset config JSON
-        model_artifact_id: SHA256 hash of model weights .pth file
-        user_id: User ID from API Gateway
+        request: Training job request with artifact IDs
+        db: Database session
+        user_id: User ID from API Gateway (injected via header)
     
     Returns:
-        Job ID and status
+        Job ID and status information
     """
     import uuid
     job_id = f"job-{uuid.uuid4()}"
@@ -712,13 +721,48 @@ async def trigger_training_job(
             use_ssl=MINIO_USE_SSL
         )
         
-        for artifact_id in [config_artifact_id, dataset_artifact_id, model_artifact_id]:
+        artifact_ids = [
+            request.config_artifact_id,
+            request.dataset_artifact_id,
+            request.model_artifact_id
+        ]
+        
+        for artifact_id in artifact_ids:
             info = await storage.get_object_info(artifact_id)
             if not info:
                 raise HTTPException(
                     status_code=404,
                     detail=f"Artifact {artifact_id} not found"
                 )
+        
+        # Get model_id for uploading trained weights
+        # Priority: 1) Explicit model_id in request, 2) Lookup from artifact upload history
+        model_id = request.model_id
+        
+        if model_id is None:
+            # Query the upload session to find which model this artifact belongs to
+            # Filter by user_id to ensure we get the correct model for this user
+            from sqlalchemy import case
+            from database import UploadStatus
+            
+            model_session = db.query(UploadSession).filter(
+                UploadSession.file_hash == request.model_artifact_id,
+                UploadSession.user_id == user_id  # Filter by user to get the correct model
+            ).order_by(
+                case(
+                    (UploadSession.status == UploadStatus.COMPLETED, 0),
+                    else_=1
+                ),
+                UploadSession.created_at.desc()
+            ).first()
+            
+            if model_session:
+                model_id = model_session.model_id
+                logger.info(f"Found model_id {model_id} for artifact {request.model_artifact_id} (user: {user_id})")
+            else:
+                logger.warning(f"Could not find model_id for artifact {request.model_artifact_id} (user: {user_id}) - trained weights upload may fail")
+        else:
+            logger.info(f"Using explicit model_id {model_id} from request")
         
         # Publish to RabbitMQ
         publisher = get_event_publisher()
@@ -730,22 +774,22 @@ async def trigger_training_job(
         
         message = {
             "job_id": job_id,
-            "config_artifact_id": config_artifact_id,
-            "dataset_artifact_id": dataset_artifact_id,
-            "model_artifact_id": model_artifact_id,
-            "user_id": user_id
+            "config_artifact_id": request.config_artifact_id,
+            "dataset_artifact_id": request.dataset_artifact_id,
+            "model_artifact_id": request.model_artifact_id,
+            "user_id": user_id,
+            "model_id": model_id  # Include model_id for uploading trained weights
         }
         
-        # You'll need to add this method to event_publisher.py
         publisher.publish_training_job(message)
         
         logger.info(f"Training job {job_id} queued successfully")
         
-        return {
-            "job_id": job_id,
-            "status": "queued",
-            "message": "Training job has been queued for processing"
-        }
+        return TrainingJobResponse(
+            job_id=job_id,
+            status="queued",
+            message="Training job has been queued for processing"
+        )
         
     except HTTPException:
         raise
