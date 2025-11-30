@@ -65,7 +65,7 @@ async def lifespan(app: FastAPI):
     create_db_and_tables()
     
     # Initialize storage service (creates bucket if needed)
-        storage = StorageService(
+    storage = StorageService(
         endpoint=MINIO_ENDPOINT,
         access_key=MINIO_ACCESS_KEY,
         secret_key=MINIO_SECRET_KEY,
@@ -106,12 +106,12 @@ async def health_check(db: Session = Depends(get_db)):
     # Check MinIO connectivity
     try:
         storage = StorageService(
-        endpoint=MINIO_ENDPOINT,
-        access_key=MINIO_ACCESS_KEY,
-        secret_key=MINIO_SECRET_KEY,
-        bucket=MINIO_BUCKET,
-        use_ssl=MINIO_USE_SSL
-    )
+            endpoint=MINIO_ENDPOINT,
+            access_key=MINIO_ACCESS_KEY,
+            secret_key=MINIO_SECRET_KEY,
+            bucket=MINIO_BUCKET,
+            use_ssl=MINIO_USE_SSL
+        )
         await storage.initialize()
         storage_status = "online"
     except Exception as e:
@@ -159,7 +159,7 @@ async def initiate_upload(
     logger.info(f"User {user_id} initiating upload for {request.filename} ({request.file_size} bytes)")
     
     # Initialize services
-        storage = StorageService(
+    storage = StorageService(
         endpoint=MINIO_ENDPOINT,
         access_key=MINIO_ACCESS_KEY,
         secret_key=MINIO_SECRET_KEY,
@@ -242,7 +242,7 @@ async def complete_upload(
     logger.info(f"User {user_id} completing upload {upload_id}")
     
     # Initialize services
-        storage = StorageService(
+    storage = StorageService(
         endpoint=MINIO_ENDPOINT,
         access_key=MINIO_ACCESS_KEY,
         secret_key=MINIO_SECRET_KEY,
@@ -342,7 +342,7 @@ async def abort_upload(
     """
     logger.info(f"User {user_id} aborting upload {upload_id}")
     
-        storage = StorageService(
+    storage = StorageService(
         endpoint=MINIO_ENDPOINT,
         access_key=MINIO_ACCESS_KEY,
         secret_key=MINIO_SECRET_KEY,
@@ -410,7 +410,7 @@ async def get_download_url(
     else:
         logger.info(f"Public download requested for {artifact_id}")
     
-        storage = StorageService(
+    storage = StorageService(
         endpoint=MINIO_ENDPOINT,
         access_key=MINIO_ACCESS_KEY,
         secret_key=MINIO_SECRET_KEY,
@@ -536,15 +536,14 @@ async def delete_artifact(
             detail=f"Invalid artifact_id format: {artifact_id}"
         )
     
-        storage = StorageService(
-        endpoint=MINIO_ENDPOINT,
-        access_key=MINIO_ACCESS_KEY,
-        secret_key=MINIO_SECRET_KEY,
-        bucket=MINIO_BUCKET,
-        use_ssl=MINIO_USE_SSL
-    )
-    
     try:
+        storage = StorageService(
+            endpoint=MINIO_ENDPOINT,
+            access_key=MINIO_ACCESS_KEY,
+            secret_key=MINIO_SECRET_KEY,
+            bucket=MINIO_BUCKET,
+            use_ssl=MINIO_USE_SSL
+        )
         # STEP 1: Find upload session to check ownership
         from sqlalchemy import case
         from database import UploadStatus
@@ -714,12 +713,12 @@ async def trigger_training_job(
     try:
         # Verify all artifacts exist before queuing
         storage = StorageService(
-        endpoint=MINIO_ENDPOINT,
-        access_key=MINIO_ACCESS_KEY,
-        secret_key=MINIO_SECRET_KEY,
-        bucket=MINIO_BUCKET,
-        use_ssl=MINIO_USE_SSL
-    )
+            endpoint=MINIO_ENDPOINT,
+            access_key=MINIO_ACCESS_KEY,
+            secret_key=MINIO_SECRET_KEY,
+            bucket=MINIO_BUCKET,
+            use_ssl=MINIO_USE_SSL
+        )
         
         artifact_ids = [
             request.config_artifact_id,
