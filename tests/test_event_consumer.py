@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Pytest tests for Event Consumer functionality
 Tests that the Model Catalog event consumer properly listens to artifact events

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Testing for the complete training flow:
 1. Model creation

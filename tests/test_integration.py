@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Integration tests for API Gateway - Model Catalog using Bearer JWTs
 Including async messaging via RabbitMQ

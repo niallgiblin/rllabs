@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Security-focused tests for the RLLabs platform.
 

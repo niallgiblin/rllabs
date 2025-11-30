@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Tests for API Gateway Retry Logic with Exponential Backoff.
 

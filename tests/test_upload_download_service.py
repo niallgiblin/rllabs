@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Comprehensive pytest tests for Upload/Download Service integration
 Tests the full workflow through API Gateway with JWT authentication

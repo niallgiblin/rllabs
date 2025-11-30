@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Comprehensive tests for Collaboration Service integration:
 1. Comment CRUD operations through API Gateway
