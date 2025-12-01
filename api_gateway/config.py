@@ -3,7 +3,12 @@ from typing import Dict, List
 
 class Settings(BaseSettings):
     GATEWAY_URL: str = "http://localhost:8080"
-    ALLOWED_ORIGINS: List[str] = ["http://localhost:3000", "http://localhost:8080"]
+    ALLOWED_ORIGINS: List[str] = [
+        "http://localhost:3000", 
+        "http://localhost:8080",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173"
+    ]
     MONITORING_ENABLED: bool = True
     
     # Redis
@@ -18,13 +23,15 @@ class Settings(BaseSettings):
         "/api/uploads": "http://upload-download-service:8002",
         "/api/downloads": "http://upload-download-service:8002",
         
+        # Collaboration Service (comments)
+        "/api/comments": "http://collaboration-service:8000",
+        
         # Model Catalog Service
         "/api/models": "http://model-catalog-service:8000",
+        "/api/versions": "http://model-catalog-service:8000",
         
-        # Future services (commented out until implemented)
-        # "/api/training": "http://training-service:8003",
-        # "/api/mazes": "http://maze-service:8004",
-        # "/api/comments": "http://comment-service:8005",
+        # Training Jobs (handled by Upload/Download Service)
+        "/api/training-jobs": "http://upload-download-service:8002",
     }
     
     # Rate Limiting

@@ -29,7 +29,8 @@ from database import get_db, create_db_and_tables
 from models import (
     UploadInitRequest, UploadInitResponse, PresignedURL,
     UploadCompleteRequest, UploadCompleteResponse,
-    DownloadResponse, UploadPart
+    DownloadResponse, UploadPart,
+    TrainingJobRequest, TrainingJobResponse
 )
 from storage import StorageService
 from session_manager import SessionManager
@@ -44,6 +45,7 @@ logger = logging.getLogger(__name__)
 # Configuration from environment
 import os
 MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "minio:9000")
+MINIO_PUBLIC_ENDPOINT = os.getenv("MINIO_PUBLIC_ENDPOINT", "localhost:9000")  # For browser-accessible presigned URLs
 MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
 MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "minioadmin_password")
 MINIO_BUCKET = os.getenv("MINIO_BUCKET", "models")
@@ -69,7 +71,8 @@ async def lifespan(app: FastAPI):
         access_key=MINIO_ACCESS_KEY,
         secret_key=MINIO_SECRET_KEY,
         bucket=MINIO_BUCKET,
-        use_ssl=MINIO_USE_SSL
+        use_ssl=MINIO_USE_SSL,
+        public_endpoint=MINIO_PUBLIC_ENDPOINT
     )
     await storage.initialize()
     
@@ -172,7 +175,8 @@ async def initiate_upload(
         access_key=MINIO_ACCESS_KEY,
         secret_key=MINIO_SECRET_KEY,
         bucket=MINIO_BUCKET,
-        use_ssl=MINIO_USE_SSL
+        use_ssl=MINIO_USE_SSL,
+        public_endpoint=MINIO_PUBLIC_ENDPOINT
     )
     session_manager = SessionManager(db, storage)
     
@@ -255,7 +259,8 @@ async def complete_upload(
         access_key=MINIO_ACCESS_KEY,
         secret_key=MINIO_SECRET_KEY,
         bucket=MINIO_BUCKET,
-        use_ssl=MINIO_USE_SSL
+        use_ssl=MINIO_USE_SSL,
+        public_endpoint=MINIO_PUBLIC_ENDPOINT
     )
     session_manager = SessionManager(db, storage)
     
@@ -355,7 +360,8 @@ async def abort_upload(
         access_key=MINIO_ACCESS_KEY,
         secret_key=MINIO_SECRET_KEY,
         bucket=MINIO_BUCKET,
-        use_ssl=MINIO_USE_SSL
+        use_ssl=MINIO_USE_SSL,
+        public_endpoint=MINIO_PUBLIC_ENDPOINT
     )
     session_manager = SessionManager(db, storage)
     
@@ -423,7 +429,8 @@ async def get_download_url(
         access_key=MINIO_ACCESS_KEY,
         secret_key=MINIO_SECRET_KEY,
         bucket=MINIO_BUCKET,
-        use_ssl=MINIO_USE_SSL
+        use_ssl=MINIO_USE_SSL,
+        public_endpoint=MINIO_PUBLIC_ENDPOINT
     )
     
     try:
@@ -544,15 +551,14 @@ async def delete_artifact(
             detail=f"Invalid artifact_id format: {artifact_id}"
         )
     
-    storage = StorageService(
-        endpoint=MINIO_ENDPOINT,
-        access_key=MINIO_ACCESS_KEY,
-        secret_key=MINIO_SECRET_KEY,
-        bucket=MINIO_BUCKET,
-        use_ssl=MINIO_USE_SSL
-    )
-    
     try:
+        storage = StorageService(
+            endpoint=MINIO_ENDPOINT,
+            access_key=MINIO_ACCESS_KEY,
+            secret_key=MINIO_SECRET_KEY,
+            bucket=MINIO_BUCKET,
+            use_ssl=MINIO_USE_SSL
+        )
         # STEP 1: Find upload session to check ownership
         from sqlalchemy import case
         from database import UploadStatus
@@ -686,6 +692,127 @@ async def register_with_model_catalog(
             logger.error(f"Failed to connect to Model Catalog: {e}")
             raise Exception(f"Model Catalog unavailable: {str(e)}")
 
+
+@app.post("/training-jobs", response_model=TrainingJobResponse, status_code=202, tags=["Training"])
+async def trigger_training_job(
+    request: TrainingJobRequest,
+    db: Session = Depends(get_db),
+    user_id: str = Header(..., alias="X-User-Id")
+):
+    """
+    Trigger a training job by publishing to RabbitMQ
+    
+    This endpoint validates that all required artifacts exist in MinIO,
+    then publishes a training job message to RabbitMQ for asynchronous processing
+    by the training service.
+    
+    Flow:
+    1. Validate all artifacts exist in MinIO
+    2. Query database to get model_id from model artifact
+    3. Publish job message to RabbitMQ queue
+    4. Return job_id for tracking
+    
+    Args:
+        request: Training job request with artifact IDs
+        db: Database session
+        user_id: User ID from API Gateway (injected via header)
+    
+    Returns:
+        Job ID and status information
+    """
+    import uuid
+    job_id = f"job-{uuid.uuid4()}"
+    
+    logger.info(f"User {user_id} triggering training job {job_id}")
+    
+    try:
+        # Verify all artifacts exist before queuing
+        storage = StorageService(
+            endpoint=MINIO_ENDPOINT,
+            access_key=MINIO_ACCESS_KEY,
+            secret_key=MINIO_SECRET_KEY,
+            bucket=MINIO_BUCKET,
+            use_ssl=MINIO_USE_SSL
+        )
+        
+        artifact_ids = [
+            request.config_artifact_id,
+            request.dataset_artifact_id,
+            request.model_artifact_id
+        ]
+        
+        for artifact_id in artifact_ids:
+            info = await storage.get_object_info(artifact_id)
+            if not info:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Artifact {artifact_id} not found"
+                )
+        
+        # Get model_id for uploading trained weights
+        # Priority: 1) Explicit model_id in request, 2) Lookup from artifact upload history
+        model_id = request.model_id
+        
+        if model_id is None:
+            # Query the upload session to find which model this artifact belongs to
+            # Filter by user_id to ensure we get the correct model for this user
+            from sqlalchemy import case
+            from database import UploadStatus
+            
+            model_session = db.query(UploadSession).filter(
+                UploadSession.file_hash == request.model_artifact_id,
+                UploadSession.user_id == user_id  # Filter by user to get the correct model
+            ).order_by(
+                case(
+                    (UploadSession.status == UploadStatus.COMPLETED, 0),
+                    else_=1
+                ),
+                UploadSession.created_at.desc()
+            ).first()
+            
+            if model_session:
+                model_id = model_session.model_id
+                logger.info(f"Found model_id {model_id} for artifact {request.model_artifact_id} (user: {user_id})")
+            else:
+                logger.warning(f"Could not find model_id for artifact {request.model_artifact_id} (user: {user_id}) - trained weights upload may fail")
+        else:
+            logger.info(f"Using explicit model_id {model_id} from request")
+        
+        # Publish to RabbitMQ
+        publisher = get_event_publisher()
+        if not publisher:
+            raise HTTPException(
+                status_code=503,
+                detail="Event publisher not available"
+            )
+        
+        message = {
+            "job_id": job_id,
+            "config_artifact_id": request.config_artifact_id,
+            "dataset_artifact_id": request.dataset_artifact_id,
+            "model_artifact_id": request.model_artifact_id,
+            "user_id": user_id,
+            "model_id": model_id  # Include model_id for uploading trained weights
+        }
+        
+        publisher.publish_training_job(message)
+        
+        logger.info(f"Training job {job_id} queued successfully")
+        
+        return TrainingJobResponse(
+            job_id=job_id,
+            status="queued",
+            message="Training job has been queued for processing"
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error triggering training job: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to trigger training job: {str(e)}"
+        )
 
 if __name__ == "__main__":
     import uvicorn

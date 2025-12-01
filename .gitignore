@@ -13,3 +13,19 @@ __pycache__/
 rllabs.code-workspace
 
 .DS_STORE
+
+# Frontend build artifacts
+node_modules/
+dist/
+build/
+*.local
+.env
+.env.local
+.env.*.local
+
+# Frontend package manager (lock files should usually be committed)
+# yarn.lock
+# pnpm-lock.yaml
+
+# Auth user data (dev only)
+api_gateway/users.json

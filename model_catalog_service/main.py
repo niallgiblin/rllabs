@@ -119,9 +119,37 @@ async def health_check(db: Session = Depends(database.get_db)):
 
 # API endpoints
 @app.post("/models/{model_id}/versions", response_model=ModelVersion, status_code=201, tags=["Models"])
-async def register_model_version(model_id: int, version_data: ModelVersionCreate, db: Session = Depends(database.get_db)):
+async def register_model_version(
+    model_id: int, 
+    version_data: ModelVersionCreate, 
+    db: Session = Depends(database.get_db),
+    user_id: Optional[str] = Header(None, alias="X-User-Id")
+):
     """
-    Registers a new model version. This is called by the upload service after a file is successfully uploaded.
+    Registers a new model version.
+    
+    This endpoint is called by the Upload/Download Service after a file is successfully uploaded.
+    It can also be called when trained model weights are uploaded by the Training Service.
+    
+    Flow:
+    1. Upload/Download Service completes artifact upload
+    2. Upload/Download Service calls this endpoint to register the version
+    3. Model Catalog creates a new version record
+    
+    The version number is automatically assigned based on existing versions for the model.
+    Content hash (SHA-256) is used for deduplication - same hash cannot be registered twice.
+    
+    Args:
+        model_id: ID of the parent model
+        version_data: Version information (version number, storage_path, content_hash)
+        user_id: User ID from API Gateway (optional, for audit logging)
+    
+    Returns:
+        Created model version with assigned ID
+    
+    Raises:
+        404: Model not found
+        409: Version or content hash already exists for this model
     """
     db_model = db.query(database.Model).filter(database.Model.id == model_id).first()
     if not db_model:
@@ -132,14 +160,27 @@ async def register_model_version(model_id: int, version_data: ModelVersionCreate
         db.add(db_version)
         db.commit()
         db.refresh(db_version)
+        
+        logger.info(
+            f"Registered version {db_version.version} for model {model_id} "
+            f"(content_hash: {db_version.content_hash[:16]}...)"
+        )
+        
         return db_version
     except IntegrityError as e:
-        print(f"IntegrityError caught in register_model_version: {e}")
+        logger.warning(f"IntegrityError in register_model_version: {e}")
         db.rollback()
-        raise HTTPException(status_code=409, detail="This model version or content hash already exists for this model.")
+        raise HTTPException(
+            status_code=409, 
+            detail="This model version or content hash already exists for this model."
+        )
     except Exception as e:
+        logger.error(f"Error registering model version: {e}")
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"An unexpected database error occurred: {e}")
+        raise HTTPException(
+            status_code=500, 
+            detail=f"An unexpected database error occurred: {e}"
+        )
 
 @app.get("/models", response_model=List[Model], tags=["Models"])
 async def list_models(db: Session = Depends(database.get_db)):
@@ -198,6 +239,11 @@ async def get_model_details(model_id: int, db: Session = Depends(database.get_db
 async def get_latest_model_path(model_id: int, db: Session = Depends(database.get_db)):
     """
     Gets the storage path of the latest version for a given model.
+    
+    Useful for:
+    - Getting the most recent trained version
+    - Finding the current production version
+    - Resolving model references to specific versions
     """
     try:
         latest_version = (
@@ -214,6 +260,75 @@ async def get_latest_model_path(model_id: int, db: Session = Depends(database.ge
     except Exception as e:
         if isinstance(e, HTTPException):
             raise e
+        raise HTTPException(status_code=503, detail=f"Database is unavailable: {e}")
+
+@app.get("/models/{model_id}/versions", response_model=List[ModelVersion], tags=["Models"])
+async def list_model_versions(model_id: int, db: Session = Depends(database.get_db)):
+    """
+    Lists all versions for a given model.
+    
+    Returns versions in descending order (newest first).
+    Useful for:
+    - Viewing training history
+    - Tracking model evolution
+    - Finding specific versions by content hash
+    """
+    db_model = db.query(database.Model).filter(database.Model.id == model_id).first()
+    if not db_model:
+        raise HTTPException(status_code=404, detail="Model not found")
+    
+    try:
+        versions = (
+            db.query(database.ModelVersion)
+            .filter(database.ModelVersion.model_id == model_id)
+            .order_by(desc(database.ModelVersion.version))
+            .all()
+        )
+        return versions
+    except Exception as e:
+        logger.error(f"Error listing model versions: {e}")
+        raise HTTPException(status_code=503, detail=f"Database is unavailable: {e}")
+
+@app.get("/versions/by-hash/{content_hash}", response_model=ModelVersion, tags=["Models"])
+async def get_version_by_hash(content_hash: str, db: Session = Depends(database.get_db)):
+    """
+    Get a model version by its content hash (SHA-256).
+    
+    Useful for:
+    - Verifying if an artifact (from training or upload) already exists
+    - Finding which model/version corresponds to a specific artifact
+    - Deduplication checks
+    
+    Args:
+        content_hash: SHA-256 hash of the model file (with or without 'sha256:' prefix)
+    
+    Returns:
+        Model version information if found
+    """
+    # Normalize hash format (accept with or without 'sha256:' prefix)
+    if content_hash.startswith("sha256:"):
+        normalized_hash = content_hash
+    else:
+        normalized_hash = f"sha256:{content_hash}"
+    
+    try:
+        version = (
+            db.query(database.ModelVersion)
+            .filter(database.ModelVersion.content_hash == normalized_hash)
+            .first()
+        )
+        
+        if not version:
+            raise HTTPException(
+                status_code=404, 
+                detail=f"No model version found with content hash: {normalized_hash}"
+            )
+        
+        return version
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error querying version by hash: {e}")
         raise HTTPException(status_code=503, detail=f"Database is unavailable: {e}")
 
 @app.get("/models/{model_id}/ownership", tags=["Models"])

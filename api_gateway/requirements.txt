@@ -11,3 +11,4 @@ requests
 Authlib==1.2.1
 circuitbreaker==2.0.0
 prometheus-fastapi-instrumentator==6.1.0
+email-validator==2.1.0
