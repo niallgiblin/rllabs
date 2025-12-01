@@ -51,17 +51,21 @@
             <span v-if="model.versions && model.versions.length > 0" class="px-2.5 py-1 rounded-md bg-white/5 border border-white/10 text-sm text-muted-foreground">
               v{{ model.versions.length }}
             </span>
+            <span v-else class="px-2.5 py-1 rounded-md bg-yellow-500/20 border border-yellow-500/30 text-sm text-yellow-400">
+              No versions yet
+            </span>
           </div>
           <p class="text-xl text-muted-foreground max-w-2xl">{{ model.description }}</p>
         </div>
         <div class="flex gap-3">
            <button 
             @click="handleDownload"
-            :disabled="downloading || !model.versions || model.versions.length === 0"
+            :disabled="downloading || !model || !model.versions || model.versions.length === 0"
             class="bg-white/5 hover:bg-white/10 border border-white/10 text-foreground px-4 py-2 rounded-lg font-medium transition-colors flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+            :title="(!model || !model.versions || model.versions.length === 0) ? 'No versions available for download. Upload a file to create a version.' : 'Download latest version'"
           >
             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
-            {{ downloading ? 'Preparing...' : 'Download' }}
+            {{ downloading ? 'Preparing...' : (model && model.versions && model.versions.length > 0 ? 'Download' : 'No Versions') }}
           </button>
           <button class="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white px-6 py-2 rounded-lg font-medium transition-all shadow-lg shadow-blue-500/20">
             Run in Colab
@@ -186,16 +190,41 @@ const fetchModel = async () => {
     loading.value = true
     error.value = null
     const id = parseInt(route.params.id)
+    console.log('Fetching model:', id)
+    
     const data = await modelsApi.get(id)
+    console.log('Model data received:', data)
+    
+    // Fetch versions separately if not included in model response
+    let versions = data.versions || []
+    console.log('Versions from model response:', versions)
+    
+    if (!versions || versions.length === 0) {
+      try {
+        // Try to fetch versions from the versions endpoint
+        console.log('Fetching versions separately...')
+        versions = await modelsApi.getVersions(id)
+        console.log('Versions fetched separately:', versions)
+      } catch (versionErr) {
+        console.warn('Could not fetch versions:', versionErr)
+        versions = []
+      }
+    }
+    
+    // Sort versions by version number (descending - latest first)
+    versions = versions.sort((a, b) => (b.version || 0) - (a.version || 0))
+    console.log('Sorted versions:', versions)
     
     model.value = {
       id: data.id,
       name: data.name,
       description: data.description || 'No description available',
-      downloads: data.versions?.length || 0,
+      downloads: versions.length,
       createdBy: data.created_by,
-      versions: data.versions || []
+      versions: versions
     }
+    
+    console.log('Model state set:', model.value)
   } catch (err) {
     console.error('Failed to fetch model:', err)
     error.value = err.message || 'Failed to load model'
@@ -206,24 +235,72 @@ const fetchModel = async () => {
 
 // Download model
 const handleDownload = async () => {
-  if (!model.value || !model.value.versions || model.value.versions.length === 0) {
-    alert('No versions available for download')
+  console.log('Download button clicked', { model: model.value })
+  
+  if (!model.value) {
+    alert('Model not loaded')
+    return
+  }
+  
+  if (!model.value.versions || model.value.versions.length === 0) {
+    console.warn('No versions available', { versions: model.value.versions })
+    alert('No versions available for download. Please ensure the model has been uploaded.')
     return
   }
   
   try {
     downloading.value = true
-    // Get the latest version's content hash
-    const latestVersion = model.value.versions[model.value.versions.length - 1]
-    const artifactId = latestVersion.content_hash
     
+    // Get the latest version (first in sorted array, or highest version number)
+    const latestVersion = model.value.versions[0]
+    console.log('Latest version:', latestVersion)
+    
+    // Extract artifact ID (content_hash)
+    let artifactId = latestVersion.content_hash
+    
+    console.log('Artifact ID from version:', artifactId)
+    
+    // Ensure artifact ID is in correct format (sha256:...)
+    if (!artifactId) {
+      console.error('Version missing content_hash:', latestVersion)
+      throw new Error('Version does not have a content hash. The model may not have been fully uploaded.')
+    }
+    
+    // Normalize format: ensure it starts with 'sha256:'
+    if (!artifactId.startsWith('sha256:')) {
+      // If it's just the hash without prefix, add it
+      if (/^[a-f0-9]{64}$/i.test(artifactId)) {
+        artifactId = `sha256:${artifactId}`
+        console.log('Normalized artifact ID:', artifactId)
+      } else {
+        throw new Error(`Invalid artifact ID format: ${artifactId}. Expected sha256:... or 64-character hex string.`)
+      }
+    }
+    
+    console.log('Requesting download URL for:', artifactId)
+    
+    // Get download URL from API
     const downloadData = await downloadsApi.getDownloadUrl(artifactId)
     
+    console.log('Download response:', downloadData)
+    
+    if (!downloadData || !downloadData.download_url) {
+      console.error('Invalid download response:', downloadData)
+      throw new Error('Invalid download response from server. Please try again.')
+    }
+    
+    // Replace Docker internal hostname with localhost for browser access
+    // Backend should generate URLs with localhost:9000, but this is a fallback
+    let downloadUrl = downloadData.download_url
+    downloadUrl = downloadUrl.replace(/http:\/\/minio:9000/g, 'http://localhost:9000')
+    
     // Open download URL in new tab
-    window.open(downloadData.download_url, '_blank')
+    console.log('Opening download URL:', downloadUrl)
+    window.open(downloadUrl, '_blank')
   } catch (err) {
-    console.error('Failed to get download URL:', err)
-    alert(err.message || 'Failed to get download URL')
+    console.error('Download error:', err)
+    const errorMessage = err.message || 'Failed to get download URL'
+    alert(`Download failed: ${errorMessage}`)
   } finally {
     downloading.value = false
   }

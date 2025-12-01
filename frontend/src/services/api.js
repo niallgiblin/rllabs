@@ -56,7 +56,8 @@ export async function apiRequest(endpoint, options = {}) {
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({ 
           error: 'Unknown error',
-          error_description: `HTTP ${response.status}: ${response.statusText}`
+          error_description: `HTTP ${response.status}: ${response.statusText}`,
+          detail: `HTTP ${response.status}: ${response.statusText}`
         }))
         
         // Don't retry on client errors (4xx) except 429 (rate limit)
@@ -66,7 +67,9 @@ export async function apiRequest(endpoint, options = {}) {
             auth.logout()
             throw new Error('Authentication required. Please sign in again.')
           }
-          throw new Error(errorData.error_description || errorData.error || 'Request failed')
+          // Extract error message - try detail first (FastAPI format), then error_description, then error
+          const errorMessage = errorData.detail || errorData.error_description || errorData.error || `Request failed (${response.status})`
+          throw new Error(errorMessage)
         }
         
         // Retry on rate limit (429) or server errors (5xx)
@@ -127,6 +130,10 @@ export const models = {
   
   async getLatestVersion(modelId) {
     return apiRequest(`/api/models/${modelId}/latest`)
+  },
+  
+  async getVersions(modelId) {
+    return apiRequest(`/api/models/${modelId}/versions`)
   },
   
   async delete(id) {

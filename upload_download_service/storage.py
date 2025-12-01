@@ -18,6 +18,7 @@ Architectural Decision: Why MinIO over filesystem?
 
 import aioboto3
 from botocore.exceptions import ClientError
+from botocore.config import Config
 from typing import Dict, List, Optional
 import logging
 from datetime import datetime, timedelta
@@ -39,19 +40,23 @@ class StorageService:
         access_key: str,
         secret_key: str,
         bucket: str,
-        use_ssl: bool = False
+        use_ssl: bool = False,
+        public_endpoint: Optional[str] = None
     ):
         """
         Initialize storage service
         
         Args:
-            endpoint: MinIO endpoint (e.g., "minio:9000")
+            endpoint: MinIO endpoint for internal access (e.g., "minio:9000")
             access_key: MinIO access key
             secret_key: MinIO secret key
             bucket: Bucket name for storing artifacts
             use_ssl: Whether to use HTTPS (False for local development)
+            public_endpoint: Public endpoint for presigned URLs (e.g., "localhost:9000")
+                           If None, uses endpoint. Used for browser-accessible URLs.
         """
         self.endpoint = endpoint
+        self.public_endpoint = public_endpoint or endpoint
         self.access_key = access_key
         self.secret_key = secret_key
         self.bucket = bucket
@@ -100,12 +105,23 @@ class StorageService:
         
         Returns:
             MinIO's upload ID for this multipart session
+        
+        Note: Uses internal endpoint since this is server-to-server communication
         """
+        # Use internal endpoint for server operations (not presigned URLs)
+        config = Config(
+            signature_version='s3v4',
+            s3={
+                'addressing_style': 'path'
+            }
+        )
+        
         async with self.session.client(
             's3',
             endpoint_url=f"{'https' if self.use_ssl else 'http'}://{self.endpoint}",
             aws_access_key_id=self.access_key,
             aws_secret_access_key=self.secret_key,
+            config=config
         ) as s3_client:
             try:
                 response = await s3_client.create_multipart_upload(
@@ -143,12 +159,26 @@ class StorageService:
         
         Returns:
             Presigned URL that client can use to PUT the chunk
+            Uses public_endpoint if configured (for browser access)
         """
+        # Use public endpoint for presigned URLs (browser-accessible)
+        # but use internal endpoint for actual operations
+        presigned_endpoint = self.public_endpoint
+        
+        # Configure boto3 to use path-style addressing and ensure signature compatibility
+        config = Config(
+            signature_version='s3v4',
+            s3={
+                'addressing_style': 'path'
+            }
+        )
+        
         async with self.session.client(
             's3',
-            endpoint_url=f"{'https' if self.use_ssl else 'http'}://{self.endpoint}",
+            endpoint_url=f"{'https' if self.use_ssl else 'http'}://{presigned_endpoint}",
             aws_access_key_id=self.access_key,
             aws_secret_access_key=self.secret_key,
+            config=config
         ) as s3_client:
             try:
                 url = await s3_client.generate_presigned_url(
@@ -341,12 +371,25 @@ class StorageService:
         
         Returns:
             Presigned URL for GET operation
+            Uses public_endpoint if configured (for browser access)
         """
+        # Use public endpoint for presigned URLs (browser-accessible)
+        presigned_endpoint = self.public_endpoint
+        
+        # Configure boto3 to use path-style addressing and ensure signature compatibility
+        config = Config(
+            signature_version='s3v4',
+            s3={
+                'addressing_style': 'path'
+            }
+        )
+        
         async with self.session.client(
             's3',
-            endpoint_url=f"{'https' if self.use_ssl else 'http'}://{self.endpoint}",
+            endpoint_url=f"{'https' if self.use_ssl else 'http'}://{presigned_endpoint}",
             aws_access_key_id=self.access_key,
             aws_secret_access_key=self.secret_key,
+            config=config
         ) as s3_client:
             try:
                 url = await s3_client.generate_presigned_url(

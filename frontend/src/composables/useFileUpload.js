@@ -59,6 +59,10 @@ export function useFileUpload() {
         const presignedUrlData = sortedUrls[i]
         const partNumber = presignedUrlData.part_number
         const presignedUrl = presignedUrlData.url
+        
+        // Note: Presigned URLs should now be generated with public_endpoint (localhost:9000)
+        // No need to replace hostname anymore - backend handles this
+        
         const start = (partNumber - 1) * chunkSize
         const end = Math.min(start + chunkSize, file.size)
         const chunk = file.slice(start, end)

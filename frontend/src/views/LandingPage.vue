@@ -172,9 +172,10 @@
           
           <div 
             @click="triggerFileInput"
-            @dragover.prevent="isDragging = true"
-            @dragleave.prevent="isDragging = false"
-            @drop.prevent="handleFileDrop"
+            @dragover.prevent.stop="isDragging = true"
+            @dragenter.prevent.stop="isDragging = true"
+            @dragleave.prevent.stop="isDragging = false"
+            @drop.prevent.stop="handleFileDrop"
             :class="isDragging ? 'border-white/30 bg-white/10' : 'border-white/10 hover:border-white/20 hover:bg-white/5'"
             class="border-2 border-dashed rounded-xl p-8 text-center transition-all cursor-pointer group"
           >
@@ -183,14 +184,14 @@
               type="file" 
               @change="handleFileSelect"
               class="hidden"
-              accept=".pt,.pth,.onnx,.zip,.tar,.gz,.h5,.ckpt"
+              accept=".pt,.pth,.onnx,.zip,.tar,.gz,.h5,.ckpt,.json"
             >
             <div class="w-12 h-12 rounded-full bg-white/5 flex items-center justify-center mx-auto mb-4 group-hover:scale-110 transition-transform">
               <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-muted-foreground group-hover:text-white transition-colors"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/></svg>
             </div>
             <p v-if="!selectedFile" class="text-sm font-medium text-gray-300">Drop your model file here or click to browse</p>
             <p v-else class="text-sm font-medium text-white">{{ selectedFile.name }}</p>
-            <p class="text-xs text-muted-foreground mt-1">.pt, .onnx, .zip, .tar, .gz, .h5, .ckpt (max 500MB)</p>
+            <p class="text-xs text-muted-foreground mt-1">.pt, .pth, .onnx, .zip, .tar, .gz, .h5, .ckpt, .json (max 500MB)</p>
             <p v-if="selectedFile" class="text-xs text-muted-foreground mt-1">
               Size: {{ (selectedFile.size / 1024 / 1024).toFixed(2) }} MB
             </p>
@@ -465,6 +466,8 @@ const handleFileSelect = (event) => {
 }
 
 const handleFileDrop = (event) => {
+  event.preventDefault()
+  event.stopPropagation()
   isDragging.value = false
   const file = event.dataTransfer.files[0]
   if (file) {
@@ -504,6 +507,11 @@ const handleUpload = async () => {
   } catch (error) {
     // Error is already set in uploadError by useFileUpload
     console.error('Upload failed:', error)
+    // The error message should already be in uploadError from useFileUpload
+    // But ensure it's displayed
+    if (!uploadError.value && error.message) {
+      uploadError.value = error.message
+    }
   }
 }
 
