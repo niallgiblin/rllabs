@@ -26,3 +26,6 @@ build/
 # Frontend package manager (lock files should usually be committed)
 # yarn.lock
 # pnpm-lock.yaml
+
+# Auth user data (dev only)
+api_gateway/users.json

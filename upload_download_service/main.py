@@ -45,6 +45,7 @@ logger = logging.getLogger(__name__)
 # Configuration from environment
 import os
 MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "minio:9000")
+MINIO_PUBLIC_ENDPOINT = os.getenv("MINIO_PUBLIC_ENDPOINT", "localhost:9000")  # For browser-accessible presigned URLs
 MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
 MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "minioadmin_password")
 MINIO_BUCKET = os.getenv("MINIO_BUCKET", "models")
@@ -70,7 +71,8 @@ async def lifespan(app: FastAPI):
         access_key=MINIO_ACCESS_KEY,
         secret_key=MINIO_SECRET_KEY,
         bucket=MINIO_BUCKET,
-        use_ssl=MINIO_USE_SSL
+        use_ssl=MINIO_USE_SSL,
+        public_endpoint=MINIO_PUBLIC_ENDPOINT
     )
     await storage.initialize()
     
@@ -164,7 +166,8 @@ async def initiate_upload(
         access_key=MINIO_ACCESS_KEY,
         secret_key=MINIO_SECRET_KEY,
         bucket=MINIO_BUCKET,
-        use_ssl=MINIO_USE_SSL
+        use_ssl=MINIO_USE_SSL,
+        public_endpoint=MINIO_PUBLIC_ENDPOINT
     )
     session_manager = SessionManager(db, storage)
     
@@ -247,7 +250,8 @@ async def complete_upload(
         access_key=MINIO_ACCESS_KEY,
         secret_key=MINIO_SECRET_KEY,
         bucket=MINIO_BUCKET,
-        use_ssl=MINIO_USE_SSL
+        use_ssl=MINIO_USE_SSL,
+        public_endpoint=MINIO_PUBLIC_ENDPOINT
     )
     session_manager = SessionManager(db, storage)
     
@@ -347,7 +351,8 @@ async def abort_upload(
         access_key=MINIO_ACCESS_KEY,
         secret_key=MINIO_SECRET_KEY,
         bucket=MINIO_BUCKET,
-        use_ssl=MINIO_USE_SSL
+        use_ssl=MINIO_USE_SSL,
+        public_endpoint=MINIO_PUBLIC_ENDPOINT
     )
     session_manager = SessionManager(db, storage)
     
@@ -415,7 +420,8 @@ async def get_download_url(
         access_key=MINIO_ACCESS_KEY,
         secret_key=MINIO_SECRET_KEY,
         bucket=MINIO_BUCKET,
-        use_ssl=MINIO_USE_SSL
+        use_ssl=MINIO_USE_SSL,
+        public_endpoint=MINIO_PUBLIC_ENDPOINT
     )
     
     try:

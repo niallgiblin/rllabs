@@ -1,12 +1,18 @@
 # RLLabs - Reinforcement Learning Collaboration Platform
 
-A distributed microservices platform for collaborative reinforcement learning model development, training, and management. Built with FastAPI, PostgreSQL, MinIO, Redis, and Kubernetes for production-grade scalability.
+A distributed microservices platform for collaborative reinforcement learning model development, training, and management. Built with FastAPI, Vue.js, PostgreSQL, MinIO, Redis, and Kubernetes for production-grade scalability.
 
 ## Architecture Overview
 
 RLLabs is designed as a microservices architecture where specialized services handle different aspects of the ML lifecycle:
 
 ### Core Services
+
+**Frontend (Vue.js)**
+
+- Modern Vue 3 + Tailwind CSS v4 interface
+- Interactive Model Catalog and Collaboration UI
+- Runs on http://localhost:5173 (dev)
 
 **API Gateway** (Port 8080)
 
@@ -32,7 +38,6 @@ RLLabs is designed as a microservices architecture where specialized services ha
 - **Admin Delete**: Owners and admins can delete models (DELETE `/models/{model_id}`)
 - **Event Consumer**: Listens to `artifact.committed` events to auto-register model versions
 - **Event Publisher**: Publishes `ModelCreated` and `ModelDeleted` events to RabbitMQ
-
 
 **Upload/Download Service** (Port 8002)
 
@@ -101,10 +106,16 @@ RLLabs is designed as a microservices architecture where specialized services ha
 - S3-compatible object storage
 - Stores model files as artifacts
 - Single bucket `rllabs-artifacts` for all model files
-
 ## Current Implementation Status
 
 ### Fully Implemented
+
+**Frontend**
+
+- Landing page with model browsing
+- Model Collaboration page (UI skeleton)
+- Upload and Auth overlays
+- Responsive design with Tailwind v4
 
 **API Gateway**
 
@@ -200,6 +211,7 @@ RLLabs is designed as a microservices architecture where specialized services ha
 - **Docker** (v20.10+)
 - **Docker Compose** (v2.0+)
 - **Python 3.9+** (for running tests)
+- **Node.js** (v18+) and **npm** (for frontend)
 
 Kubernetes:
 
@@ -215,7 +227,7 @@ git clone <repository-url>
 cd rllabs
 ```
 
-2. Start all services:
+2. Start all services (including frontend):
 
 ```bash
 docker compose up --build
@@ -223,16 +235,19 @@ docker compose up --build
 
 This starts:
 
-- API Gateway on http://localhost:8080
-- Model Catalog on http://localhost:8001
-- Upload/Download Service on http://localhost:8002
-- Training Service (RabbitMQ consumer, no HTTP port)
-- Collaboration Service on http://localhost:8004
-- PostgreSQL on localhost:5432
-- MongoDB Replica Set on localhost:27017/27018/27019
-- Redis on localhost:6379
-- RabbitMQ on localhost:5672 (management UI: :15672)
-- MinIO on http://localhost:9000 (console: :9001)
+- **Frontend** on http://localhost:5173 (Vue.js dev server with hot reload)
+- **API Gateway** on http://localhost:8080
+- **Model Catalog** on http://localhost:8001
+- **Upload/Download Service** on http://localhost:8002
+- **Training Service** (RabbitMQ consumer, no HTTP port)
+- **Collaboration Service** on http://localhost:8004
+- **PostgreSQL** on localhost:5432
+- **MongoDB Replica Set** on localhost:27017/27018/27019
+- **Redis** on localhost:6379
+- **RabbitMQ** on localhost:5672 (management UI: http://localhost:15672)
+- **MinIO** on http://localhost:9000 (console: http://localhost:9001)
+
+**Note**: The frontend is included in docker-compose and will be available at http://localhost:5173 after the build completes. For development with hot reload, the frontend uses Vite's dev server.
 
 3. Verify services are healthy:
 
@@ -244,14 +259,14 @@ curl http://localhost:8004/health  # Collaboration Service (if health endpoint e
 # Training Service doesn't expose HTTP endpoint (RabbitMQ consumer only)
 ```
 
-4. Check Training Service is running:
+5. Check Training Service is running:
 
 ```bash
 docker compose logs model-train-service
 # Should see: "Waiting for messages on queue 'training_jobs'..."
 ```
 
-4. Stop and clean up:
+6. Stop and clean up:
 
 ```bash
 docker compose down -v
@@ -335,7 +350,7 @@ Tests Upload/Download Service integration through the gateway:
 - Multipart upload with presigned URLs
 - Content-addressed storage and deduplication
 - **RBAC Authorization**:
-  - Public downloads (no auth required - unauthenticated only)
+  - Public downloads (no auth required - unauthenticated users can download any artifact)
   - Owner-based and model-level permission checks for authenticated users
   - Authenticated non-owners receive 403 Forbidden
 - Download authorization and presigned URL generation

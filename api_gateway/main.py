@@ -15,7 +15,12 @@ except ImportError:
     # Fallback settings
     class Settings:
         GATEWAY_URL = "http://localhost:8080"
-        ALLOWED_ORIGINS = ["http://localhost:3000", "http://localhost:8080"]
+        ALLOWED_ORIGINS = [
+            "http://localhost:3000", 
+            "http://localhost:8080",
+            "http://localhost:5173",
+            "http://127.0.0.1:5173"
+        ]
         MONITORING_ENABLED = True
         MONITORING_ENABLED = True
     
@@ -110,6 +115,7 @@ app.include_router(internal_router, prefix="/internal", tags=["internal"])
 async def health():
     return {"status": "ok"}
 
+
 # Try to mount static files
 try:
     app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -188,8 +194,193 @@ async def http_exception_handler(request: Request, exc: HTTPException):
     )
 
 # Protected Route Proxy
-from jwt_auth import get_current_user, bearer_scheme
+from jwt_auth import get_current_user, bearer_scheme, create_access_token
 from fastapi.security import HTTPAuthorizationCredentials
+
+# User management (simple file-based store for development)
+# In production, this would be a database or separate user service
+import hashlib
+import json
+from pathlib import Path
+from typing import Optional, Dict
+
+_users_file = Path(__file__).parent / "users.json"
+
+def _load_users() -> Dict[str, Dict]:
+    """Load users from file or return empty dict"""
+    if _users_file.exists():
+        try:
+            with open(_users_file, 'r') as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+def _save_users(users: Dict[str, Dict]):
+    """Save users to file"""
+    try:
+        with open(_users_file, 'w') as f:
+            json.dump(users, f, indent=2)
+    except Exception as e:
+        logger.warning(f"Could not save users to file: {e}")
+
+def _hash_password(password: str) -> str:
+    """Simple password hashing (for dev - use bcrypt in production)"""
+    return hashlib.sha256(password.encode()).hexdigest()
+
+def create_user(username: str, email: str, password: str, is_admin: bool = False) -> Dict:
+    """Create a new user"""
+    users = _load_users()
+    
+    # Check if user already exists
+    if username in users:
+        raise ValueError("Username already exists")
+    
+    # Check if email already exists
+    for user in users.values():
+        if user.get('email') == email:
+            raise ValueError("Email already exists")
+    
+    # Create user
+    user = {
+        'username': username,
+        'email': email,
+        'password_hash': _hash_password(password),
+        'is_admin': is_admin,
+    }
+    
+    users[username] = user
+    _save_users(users)
+    
+    return {
+        'username': username,
+        'email': email,
+        'is_admin': is_admin
+    }
+
+def authenticate_user(username: str, password: str) -> Optional[Dict]:
+    """Authenticate a user and return user info"""
+    users = _load_users()
+    
+    if username not in users:
+        return None
+    
+    user = users[username]
+    password_hash = _hash_password(password)
+    
+    if user['password_hash'] != password_hash:
+        return None
+    
+    return {
+        'username': username,
+        'email': user['email'],
+        'is_admin': user.get('is_admin', False)
+    }
+
+def get_user(username: str) -> Optional[Dict]:
+    """Get user by username"""
+    users = _load_users()
+    if username in users:
+        user = users[username].copy()
+        user.pop('password_hash', None)  # Don't return password hash
+        return user
+    return None
+
+# Authentication endpoints (for development)
+from pydantic import BaseModel, EmailStr
+
+class RegisterRequest(BaseModel):
+    username: str
+    email: EmailStr
+    password: str
+    is_admin: bool = False
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+@app.post("/api/auth/register")
+async def register(request: RegisterRequest):
+    """Register a new user"""
+    try:
+        user = create_user(
+            username=request.username,
+            email=request.email,
+            password=request.password,
+            is_admin=request.is_admin
+        )
+        
+        # Generate JWT token
+        scopes = ["api:read", "api:write"]
+        if request.is_admin:
+            scopes.append("api:admin")
+        
+        token = create_access_token({
+            "sub": request.username,
+            "scopes": scopes
+        })
+        
+        return {
+            "user": user,
+            "token": token,
+            "token_type": "bearer"
+        }
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+
+@app.post("/api/auth/login")
+async def login(request: LoginRequest):
+    """Login and get JWT token"""
+    user = authenticate_user(request.username, request.password)
+    
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    # Generate JWT token
+    scopes = ["api:read", "api:write"]
+    if user.get('is_admin'):
+        scopes.append("api:admin")
+    
+    token = create_access_token({
+        "sub": user['username'],
+        "scopes": scopes
+    })
+    
+    return {
+        "user": {
+            "username": user['username'],
+            "email": user['email'],
+            "is_admin": user.get('is_admin', False)
+        },
+        "token": token,
+        "token_type": "bearer"
+    }
+
+@app.get("/api/auth/me")
+async def get_current_user_info(current_user: Dict[str, Any] = Depends(get_current_user)):
+    """Get current user info"""
+    username = current_user.get("user_id")
+    user = get_user(username)
+    
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+    
+    return {
+        "username": user['username'],
+        "email": user['email'],
+        "is_admin": user.get('is_admin', False),
+        "scopes": current_user.get("scopes", [])
+    }
 
 def get_optional_user(credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)) -> Optional[Dict[str, Any]]:
     """
