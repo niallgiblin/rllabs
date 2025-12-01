@@ -221,6 +221,46 @@ services:
       exit 0;
       "
 
+  # Frontend Dev - Vite dev server with hot reload (for development)
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    container_name: frontend
+    ports:
+      - "5173:5173"
+    environment:
+      - VITE_API_BASE_URL=http://localhost:8080
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    depends_on:
+      api-gateway:
+        condition: service_started
+    networks:
+      - rllabs-network
+
+  # Frontend Production (optional - for production builds)
+  # Uncomment to use production build with nginx instead of Vite dev server
+  # frontend-prod:
+  #   build:
+  #     context: ./frontend
+  #     args:
+  #       VITE_API_BASE_URL: http://localhost:8080
+  #   container_name: frontend-prod
+  #   ports:
+  #     - "5173:80"
+  #   depends_on:
+  #     api-gateway:
+  #       condition: service_started
+  #   networks:
+  #     - rllabs-network
+  #   healthcheck:
+  #     test: ["CMD", "curl", "-f", "http://localhost/health"]
+  #     interval: 30s
+  #     timeout: 10s
+  #     retries: 3
+
   # MongoDB Replica Set for Collaboration Service (CP Configuration)
   mongo1:
     image: mongo:7.0
