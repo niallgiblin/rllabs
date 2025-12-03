@@ -29,3 +29,5 @@ build/
 
 # Auth user data (dev only)
 api_gateway/users.json
+
+.python-version

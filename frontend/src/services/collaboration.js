@@ -30,17 +30,7 @@ export const collaboration = {
     })
   },
   
-  // Discussions API (to be implemented)
-  async getDiscussions(modelId) {
-    return apiRequest(`/api/models/${modelId}/discussions`)
-  },
   
-  async createDiscussion(modelId, discussion) {
-    return apiRequest(`/api/models/${modelId}/discussions`, {
-      method: 'POST',
-      body: JSON.stringify(discussion)
-    })
-  }
 }
 
 export default collaboration

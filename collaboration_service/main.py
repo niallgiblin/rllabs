@@ -132,23 +132,7 @@ def get_comments(model_id: str, page: int = 1, limit: int = 50):
 
 
 
-@app.get("/comments/{comment_id}")
-def get_comment(comment_id: str):
-    """
-    Get specific comment
-    """
-    try:
-        doc = comments_collection.find_one({"_id": ObjectId(comment_id)})
-    except:
-        raise HTTPException(status_code=400, detail="Invalid comment ID")
-    
-    if not doc:
-        raise HTTPException(status_code=404, detail="Comment not found")
-    
-    # Get creator for badge
-    creator_id = get_model_creator(doc["modelId"])
-    
-    return doc_to_response(doc, creator_id)
+
 
 
 

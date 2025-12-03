@@ -67,6 +67,10 @@
             <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></svg>
             {{ downloading ? 'Preparing...' : (model && model.versions && model.versions.length > 0 ? 'Download' : 'No Versions') }}
           </button>
+          <button @click="goToCollaboration" class="bg-white/5 hover:bg-white/10 border border-white/10 text-foreground px-4 py-2 rounded-lg font-medium transition-colors flex items-center gap-2">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
+            Discussion
+          </button>
           <button class="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white px-6 py-2 rounded-lg font-medium transition-all shadow-lg shadow-blue-500/20">
             Run in Colab
           </button>
@@ -106,24 +110,7 @@
             </div>
           </div>
 
-           <!-- Collaboration / Comments Placeholder -->
-           <div class="bg-white/5 border border-white/10 rounded-2xl p-8 relative overflow-hidden group">
-            <div class="absolute inset-0 bg-gradient-to-b from-transparent to-black/40 pointer-events-none"></div>
-            <h3 class="text-lg font-semibold mb-4 flex items-center gap-2">
-              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
-              Discussion & Collaboration
-            </h3>
-            
-            <div class="text-center py-8">
-              <div class="w-12 h-12 rounded-full bg-white/5 flex items-center justify-center mx-auto mb-4 border border-white/10">
-                 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-muted-foreground"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>
-              </div>
-              <h4 class="text-white font-medium mb-2">Collaboration features coming soon</h4>
-              <p class="text-muted-foreground text-sm max-w-xs mx-auto">
-                Join the discussion, propose changes, and collaborate on this model with your team.
-              </p>
-            </div>
-          </div>
+           
         </div>
 
         <!-- Sidebar -->
@@ -183,6 +170,10 @@ const model = ref(null)
 const loading = ref(true)
 const error = ref(null)
 const downloading = ref(false)
+
+const goToCollaboration = () => {
+  router.push({ name: 'Collaboration', params: { modelId: model.value.id } })
+}
 
 // Fetch model details
 const fetchModel = async () => {
