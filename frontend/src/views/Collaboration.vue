@@ -76,6 +76,7 @@
               :current-user="currentUser"
               @post-reply="postComment"
               @delete-comment="fetchComments"
+              @update-comment="updateComment"
             />
           </div>
         </div>
@@ -134,6 +135,15 @@ const postComment = async (parentId, content) => {
     fetchComments() // Refresh comments
   } catch (err) {
     alert('Failed to post comment: ' + err.message)
+  }
+}
+
+const updateComment = async (commentId, content) => {
+  try {
+    await collaboration.updateComment(commentId, { content })
+    fetchComments() // Refresh comments
+  } catch (err) {
+    alert('Failed to update comment: ' + err.message)
   }
 }
 

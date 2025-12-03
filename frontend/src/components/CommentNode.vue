@@ -4,7 +4,7 @@
       <span class="flex items-center justify-center h-full text-sm font-bold">{{ initials }}</span>
     </div>
     <div class="flex-grow">
-      <div class="bg-white/5 border border-white/10 rounded-lg">
+      <div v-if="!isEditing" class="bg-white/5 border border-white/10 rounded-lg">
         <div class="px-4 py-3 border-b border-white/10 flex justify-between items-center">
           <div class="flex items-center gap-2">
             <span class="font-semibold text-white">{{ comment.authorName }}</span>
@@ -16,9 +16,23 @@
           <p>{{ comment.content }}</p>
         </div>
       </div>
+      <div v-else>
+        <textarea
+          v-model="editableContent"
+          class="w-full bg-white/5 border border-white/10 rounded-lg p-3 text-foreground placeholder-muted-foreground focus:outline-none focus:ring-2 focus:ring-purple-500 transition-all"
+          rows="3"
+        ></textarea>
+      </div>
       <div class="mt-2 flex items-center gap-4">
-        <button @click="showReplyForm = !showReplyForm" class="text-xs font-medium text-muted-foreground hover:text-white transition-colors">Reply</button>
-        <button v-if="currentUser && comment.authorId === currentUser.username" @click="deleteComment" class="text-xs font-medium text-red-400 hover:text-red-300 transition-colors">Delete</button>
+        <template v-if="!isEditing">
+          <button @click="showReplyForm = !showReplyForm" class="text-xs font-medium text-muted-foreground hover:text-white transition-colors">Reply</button>
+          <button v-if="currentUser && comment.authorId === currentUser.username" @click="isEditing = true" class="text-xs font-medium text-muted-foreground hover:text-white transition-colors">Edit</button>
+          <button v-if="currentUser && comment.authorId === currentUser.username" @click="deleteComment" class="text-xs font-medium text-red-400 hover:text-red-300 transition-colors">Delete</button>
+        </template>
+        <template v-else>
+          <button @click="saveEdit" class="text-xs font-medium text-green-400 hover:text-green-300 transition-colors">Save</button>
+          <button @click="isEditing = false" class="text-xs font-medium text-muted-foreground hover:text-white transition-colors">Cancel</button>
+        </template>
       </div>
 
       <div v-if="showReplyForm" class="mt-4 flex items-start gap-4">
@@ -47,6 +61,7 @@
           :current-user="currentUser"
           @post-reply="emitPostReply"
           @delete-comment="emitDeleteComment"
+          @update-comment="emitUpdateComment"
         />
       </div>
     </div>
@@ -54,7 +69,7 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { collaboration } from '../services/collaboration'
 
 const props = defineProps({
@@ -68,10 +83,16 @@ const props = defineProps({
   }
 })
 
-const emit = defineEmits(['post-reply', 'delete-comment'])
+const emit = defineEmits(['post-reply', 'delete-comment', 'update-comment'])
 
+const isEditing = ref(false)
+const editableContent = ref(props.comment.content)
 const showReplyForm = ref(false)
 const replyContent = ref('')
+
+watch(() => props.comment.content, (newContent) => {
+  editableContent.value = newContent
+})
 
 const initials = computed(() => {
   return props.comment.authorName.substring(0, 2).toUpperCase()
@@ -101,11 +122,21 @@ const deleteComment = async () => {
   }
 }
 
+const saveEdit = () => {
+  if (!editableContent.value.trim()) return
+  emit('update-comment', props.comment.id, editableContent.value)
+  isEditing.value = false
+}
+
 const emitPostReply = (parentId, content) => {
   emit('post-reply', parentId, content)
 }
 
 const emitDeleteComment = () => {
   emit('delete-comment')
+}
+
+const emitUpdateComment = (commentId, content) => {
+  emit('update-comment', commentId, content)
 }
 </script>
