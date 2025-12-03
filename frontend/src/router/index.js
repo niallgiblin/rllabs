@@ -12,6 +12,11 @@ const routes = [
     path: '/models/:id',
     name: 'ModelCollaboration',
     component: ModelCollaboration
+  },
+  {
+    path: '/models/:modelId/collaboration',
+    name: 'Collaboration',
+    component: () => import('../views/Collaboration.vue')
   }
 ]
 
