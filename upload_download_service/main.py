@@ -17,15 +17,44 @@ Trade-offs:
 - Fail-open on events: Upload succeeds even if event publishing fails (availability over consistency)
 """
 
+# =============================================================================
+# OBSERVABILITY SETUP (must be first, before other imports)
+# =============================================================================
+import os
+import sys
+
+# Add shared module to path
+shared_path = os.path.join(os.path.dirname(__file__), 'shared')
+if os.path.exists(shared_path) and shared_path not in sys.path:
+    sys.path.insert(0, shared_path)
+
+SERVICE_NAME = os.getenv("OTEL_SERVICE_NAME", "upload-download-service")
+
+# Initialize structured logging and tracing
+try:
+    from observability import setup_logging, setup_tracing, get_logger
+    
+    json_output = os.getenv("KUBERNETES_SERVICE_HOST") is not None
+    setup_logging(service_name=SERVICE_NAME, json_output=json_output)
+    setup_tracing(service_name=SERVICE_NAME)
+    logger = get_logger(__name__)
+except ImportError:
+    import logging
+    logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger(__name__)
+    logger.warning("Observability module not available, using basic logging")
+
+# =============================================================================
+# APPLICATION IMPORTS
+# =============================================================================
 from fastapi import FastAPI, Depends, HTTPException, Header, status, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from contextlib import asynccontextmanager
 from typing import Optional, List
-import logging
 import httpx
 
-from database import get_db, create_db_and_tables
+from database import get_db, get_read_db, create_db_and_tables
 from models import (
     UploadInitRequest, UploadInitResponse, PresignedURL,
     UploadCompleteRequest, UploadCompleteResponse,
@@ -38,12 +67,7 @@ from event_publisher import get_event_publisher
 from authorization import check_download_permission
 from database import UploadSession
 
-# Setup logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
 # Configuration from environment
-import os
 MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "minio:9000")
 MINIO_PUBLIC_ENDPOINT = os.getenv("MINIO_PUBLIC_ENDPOINT", "localhost:9000")  # For browser-accessible presigned URLs
 MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
@@ -51,6 +75,27 @@ MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "minioadmin_password")
 MINIO_BUCKET = os.getenv("MINIO_BUCKET", "models")
 MINIO_USE_SSL = os.getenv("MINIO_USE_SSL", "false").lower() == "true"
 MODEL_CATALOG_URL = os.getenv("MODEL_CATALOG_URL", "http://model-catalog-service:8000")
+
+# Global StorageService instance (singleton pattern)
+# Created once on startup and reused for all requests
+_storage_service: Optional[StorageService] = None
+
+def get_storage_service() -> StorageService:
+    """
+    Get the global StorageService instance (singleton).
+    This avoids creating a new StorageService (and aioboto3 Session) on every request.
+    """
+    global _storage_service
+    if _storage_service is None:
+        _storage_service = StorageService(
+            endpoint=MINIO_ENDPOINT,
+            access_key=MINIO_ACCESS_KEY,
+            secret_key=MINIO_SECRET_KEY,
+            bucket=MINIO_BUCKET,
+            use_ssl=MINIO_USE_SSL,
+            public_endpoint=MINIO_PUBLIC_ENDPOINT
+        )
+    return _storage_service
 
 # Application lifespan - handles startup and shutdown
 @asynccontextmanager
@@ -65,15 +110,8 @@ async def lifespan(app: FastAPI):
     # Create database tables on startup
     create_db_and_tables()
     
-    # Initialize storage service (creates bucket if needed)
-    storage = StorageService(
-        endpoint=MINIO_ENDPOINT,
-        access_key=MINIO_ACCESS_KEY,
-        secret_key=MINIO_SECRET_KEY,
-        bucket=MINIO_BUCKET,
-        use_ssl=MINIO_USE_SSL,
-        public_endpoint=MINIO_PUBLIC_ENDPOINT
-    )
+    # Initialize global storage service (creates bucket if needed)
+    storage = get_storage_service()
     await storage.initialize()
     
     logger.info("Upload/Download Service ready")
@@ -90,6 +128,20 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# Health check endpoint for Kubernetes readiness/liveness probes
+# Register BEFORE Instrumentator so it can be properly excluded
+# Lightweight version - doesn't check dependencies to avoid expensive operations
+@app.get("/health", tags=["Monitoring"], include_in_schema=False)
+async def health_check():
+    """
+    Lightweight health check endpoint for Kubernetes probes
+    
+    Note: This is intentionally lightweight to avoid expensive operations
+    during frequent health checks. For detailed health, use /health/detailed
+    Excluded from schema and Prometheus metrics to minimize overhead.
+    """
+    return {"status": "ok"}
+
 # Add Prometheus metrics
 try:
     from prometheus_fastapi_instrumentator import Instrumentator
@@ -99,12 +151,13 @@ try:
 except ImportError:
     logger.warning("prometheus-fastapi-instrumentator not available - metrics disabled")
 
-# Health check endpoint for Kubernetes readiness/liveness probes
-@app.get("/health", tags=["Monitoring"])
-async def health_check(db: Session = Depends(get_db)):
+# Detailed health check endpoint (for monitoring, not probes)
+@app.get("/health/detailed", tags=["Monitoring"])
+async def detailed_health_check(db: Session = Depends(get_read_db)):
     """
-    Health check endpoint
+    Detailed health check endpoint
     Verifies database and storage connectivity
+    Use this for monitoring, not for Kubernetes probes
     """
     try:
         from sqlalchemy import text
@@ -116,13 +169,7 @@ async def health_check(db: Session = Depends(get_db)):
     
     # Check MinIO connectivity
     try:
-        storage = StorageService(
-            endpoint=MINIO_ENDPOINT,
-            access_key=MINIO_ACCESS_KEY,
-            secret_key=MINIO_SECRET_KEY,
-            bucket=MINIO_BUCKET,
-            use_ssl=MINIO_USE_SSL
-        )
+        storage = get_storage_service()
         await storage.initialize()
         storage_status = "online"
     except Exception as e:
@@ -169,15 +216,8 @@ async def initiate_upload(
     """
     logger.info(f"User {user_id} initiating upload for {request.filename} ({request.file_size} bytes)")
     
-    # Initialize services
-    storage = StorageService(
-        endpoint=MINIO_ENDPOINT,
-        access_key=MINIO_ACCESS_KEY,
-        secret_key=MINIO_SECRET_KEY,
-        bucket=MINIO_BUCKET,
-        use_ssl=MINIO_USE_SSL,
-        public_endpoint=MINIO_PUBLIC_ENDPOINT
-    )
+    # Get shared storage service instance (reused across requests)
+    storage = get_storage_service()
     session_manager = SessionManager(db, storage)
     
     try:
@@ -211,11 +251,29 @@ async def initiate_upload(
             session_expires_at=upload_session.session_expires_at
         )
         
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Error initiating upload: {e}")
+        logger.error(
+            f"Error initiating upload: {e}",
+            exc_info=True,
+            extra={
+                "user_id": user_id,
+                "filename": request.filename,
+                "file_size": request.file_size,
+                "error_type": type(e).__name__
+            }
+        )
+        # Provide more specific error messages
+        error_detail = str(e)
+        if "connection" in error_detail.lower() or "timeout" in error_detail.lower():
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Storage service temporarily unavailable. Please retry."
+            )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to initiate upload: {str(e)}"
+            detail=f"Failed to initiate upload: {error_detail}"
         )
 
 
@@ -253,15 +311,8 @@ async def complete_upload(
     """
     logger.info(f"User {user_id} completing upload {upload_id}")
     
-    # Initialize services
-    storage = StorageService(
-        endpoint=MINIO_ENDPOINT,
-        access_key=MINIO_ACCESS_KEY,
-        secret_key=MINIO_SECRET_KEY,
-        bucket=MINIO_BUCKET,
-        use_ssl=MINIO_USE_SSL,
-        public_endpoint=MINIO_PUBLIC_ENDPOINT
-    )
+    # Get shared storage service instance
+    storage = get_storage_service()
     session_manager = SessionManager(db, storage)
     
     try:
@@ -320,10 +371,24 @@ async def complete_upload(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error completing upload: {e}")
+        logger.error(
+            f"Error completing upload: {e}",
+            exc_info=True,
+            extra={
+                "upload_id": upload_id,
+                "user_id": user_id,
+                "error_type": type(e).__name__
+            }
+        )
+        error_detail = str(e)
+        if "connection" in error_detail.lower() or "timeout" in error_detail.lower():
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Storage service temporarily unavailable. Please retry."
+            )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to complete upload: {str(e)}"
+            detail=f"Failed to complete upload: {error_detail}"
         )
 
 
@@ -355,14 +420,7 @@ async def abort_upload(
     """
     logger.info(f"User {user_id} aborting upload {upload_id}")
     
-    storage = StorageService(
-        endpoint=MINIO_ENDPOINT,
-        access_key=MINIO_ACCESS_KEY,
-        secret_key=MINIO_SECRET_KEY,
-        bucket=MINIO_BUCKET,
-        use_ssl=MINIO_USE_SSL,
-        public_endpoint=MINIO_PUBLIC_ENDPOINT
-    )
+    storage = get_storage_service()
     session_manager = SessionManager(db, storage)
     
     try:
@@ -386,7 +444,7 @@ async def abort_upload(
 async def get_download_url(
     artifact_id: str,
     expires_in: int = 3600,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_read_db),
     user_id: Optional[str] = Header(None, alias="X-User-Id")
 ):
     """
@@ -424,14 +482,7 @@ async def get_download_url(
     else:
         logger.info(f"Public download requested for {artifact_id}")
     
-    storage = StorageService(
-        endpoint=MINIO_ENDPOINT,
-        access_key=MINIO_ACCESS_KEY,
-        secret_key=MINIO_SECRET_KEY,
-        bucket=MINIO_BUCKET,
-        use_ssl=MINIO_USE_SSL,
-        public_endpoint=MINIO_PUBLIC_ENDPOINT
-    )
+    storage = get_storage_service()
     
     try:
         # STEP 1: AUTHORIZATION CHECK (before generating presigned URL)
@@ -552,13 +603,7 @@ async def delete_artifact(
         )
     
     try:
-        storage = StorageService(
-            endpoint=MINIO_ENDPOINT,
-            access_key=MINIO_ACCESS_KEY,
-            secret_key=MINIO_SECRET_KEY,
-            bucket=MINIO_BUCKET,
-            use_ssl=MINIO_USE_SSL
-        )
+        storage = get_storage_service()
         # STEP 1: Find upload session to check ownership
         from sqlalchemy import case
         from database import UploadStatus
@@ -726,27 +771,20 @@ async def trigger_training_job(
     logger.info(f"User {user_id} triggering training job {job_id}")
     
     try:
-        # Verify all artifacts exist before queuing
-        storage = StorageService(
-            endpoint=MINIO_ENDPOINT,
-            access_key=MINIO_ACCESS_KEY,
-            secret_key=MINIO_SECRET_KEY,
-            bucket=MINIO_BUCKET,
-            use_ssl=MINIO_USE_SSL
-        )
-        
+        # Fast validation: only check artifact_id format, not existence
+        # Existence validation moved to async training worker for better performance
         artifact_ids = [
             request.config_artifact_id,
             request.dataset_artifact_id,
             request.model_artifact_id
         ]
         
+        # Validate artifact_id format only (fast, no I/O)
         for artifact_id in artifact_ids:
-            info = await storage.get_object_info(artifact_id)
-            if not info:
+            if not artifact_id.startswith("sha256:") or len(artifact_id) != 71:
                 raise HTTPException(
-                    status_code=404,
-                    detail=f"Artifact {artifact_id} not found"
+                    status_code=400,
+                    detail=f"Invalid artifact_id format: {artifact_id}"
                 )
         
         # Get model_id for uploading trained weights
@@ -778,14 +816,8 @@ async def trigger_training_job(
         else:
             logger.info(f"Using explicit model_id {model_id} from request")
         
-        # Publish to RabbitMQ
+        # Publish to RabbitMQ (fail-open: don't fail request if RabbitMQ unavailable)
         publisher = get_event_publisher()
-        if not publisher:
-            raise HTTPException(
-                status_code=503,
-                detail="Event publisher not available"
-            )
-        
         message = {
             "job_id": job_id,
             "config_artifact_id": request.config_artifact_id,
@@ -795,23 +827,51 @@ async def trigger_training_job(
             "model_id": model_id  # Include model_id for uploading trained weights
         }
         
-        publisher.publish_training_job(message)
-        
-        logger.info(f"Training job {job_id} queued successfully")
-        
-        return TrainingJobResponse(
-            job_id=job_id,
-            status="queued",
-            message="Training job has been queued for processing"
-        )
+        if publisher:
+            published = publisher.publish_training_job(message)
+            if published:
+                logger.info(f"Training job {job_id} queued successfully")
+                return TrainingJobResponse(
+                    job_id=job_id,
+                    status="queued",
+                    message="Training job queued. Artifacts will be validated by worker."
+                )
+            else:
+                logger.warning(f"Training job {job_id} created but not queued (RabbitMQ unavailable)")
+                return TrainingJobResponse(
+                    job_id=job_id,
+                    status="created",
+                    message="Training job created but not queued (RabbitMQ unavailable). Job will be processed when RabbitMQ is available."
+                )
+        else:
+            logger.warning(f"Training job {job_id} created but publisher unavailable")
+            return TrainingJobResponse(
+                job_id=job_id,
+                status="created",
+                message="Training job created but not queued (RabbitMQ unavailable). Job will be processed when RabbitMQ is available."
+            )
         
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error triggering training job: {e}")
+        logger.error(
+            f"Error triggering training job: {e}",
+            exc_info=True,
+            extra={
+                "job_id": job_id,
+                "user_id": user_id,
+                "error_type": type(e).__name__
+            }
+        )
+        error_detail = str(e)
+        if "connection" in error_detail.lower() or "timeout" in error_detail.lower():
+            raise HTTPException(
+                status_code=503,
+                detail="Service temporarily unavailable. Please retry."
+            )
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to trigger training job: {str(e)}"
+            detail=f"Failed to trigger training job: {error_detail}"
         )
 
 if __name__ == "__main__":

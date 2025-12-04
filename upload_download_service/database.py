@@ -23,22 +23,73 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from datetime import datetime, timezone
 import enum
+import random
 
 # Database connection
 # NOTE: In production, use connection pooling and read replicas for scalability
+# Primary database URL (for writes)
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
     "postgresql://rllabs:rllabs_password@postgres/upload_download_db"
 )
 
+# Read replica URLs (comma-separated, for reads)
+# If not set, falls back to primary for both reads and writes
+DATABASE_REPLICA_URLS = os.getenv("DATABASE_REPLICA_URLS", "")
+
+# Primary engine (for writes)
+# Configure connection pooling for better performance under load
+# REVERTED: Back to original safe limits (Phase 2 caused connection exhaustion)
 engine = create_engine(
     DATABASE_URL,
-    pool_size=10,  # Connection pool for handling concurrent requests
-    max_overflow=20,  # Allow extra connections under load
-    pool_pre_ping=True  # Verify connections before using (handles network issues)
+    pool_size=10,  # REVERTED: Back to original (was 20 in Phase 2)
+    max_overflow=10,  # REVERTED: Back to original (was 30 in Phase 2) - total 20 per pod
+    pool_pre_ping=True,  # Verify connections before using (handles network issues)
+    pool_recycle=3600,  # Recycle connections after 1 hour (prevents stale connections)
+    connect_args={
+        "connect_timeout": 10,  # Connection timeout in seconds
+        "application_name": "upload_download_service"
+    }
 )
 
+# Read replica engines (for reads)
+replica_engines = []
+if DATABASE_REPLICA_URLS:
+    replica_urls = [url.strip() for url in DATABASE_REPLICA_URLS.split(",") if url.strip()]
+    for replica_url in replica_urls:
+        replica_engine = create_engine(
+            replica_url,
+            pool_size=5,  # REVERTED: Back to original (was 10 in Phase 2)
+            max_overflow=5,  # REVERTED: Back to original (was 15 in Phase 2) - total 10 per pod per replica
+            pool_pre_ping=True,
+            pool_recycle=3600,  # Recycle connections after 1 hour
+            connect_args={
+                "connect_timeout": 10,
+                "application_name": "upload_download_service_read"
+            }
+        )
+        replica_engines.append(replica_engine)
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+def get_read_db():
+    """
+    Get a database session for read-only queries.
+    Uses read replicas if available, otherwise falls back to primary.
+    """
+    if replica_engines:
+        # Randomly select a replica for load balancing
+        replica_engine = random.choice(replica_engines)
+        ReadSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=replica_engine)
+    else:
+        # Fallback to primary if no replicas configured
+        ReadSessionLocal = SessionLocal
+    
+    db = ReadSessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
 Base = declarative_base()
 
@@ -99,7 +150,8 @@ class UploadSession(Base):
 
 def get_db():
     """
-    Database dependency for FastAPI
+    Database dependency for FastAPI (writes go to primary).
+    For read-only queries, use get_read_db() instead.
     
     Creates a new database session for each request.
     Automatically closes the session after the request completes.
@@ -107,7 +159,10 @@ def get_db():
     Usage:
         @app.get("/endpoint")
         def my_endpoint(db: Session = Depends(get_db)):
-            # Use db here
+            # Use db here for writes
+        @app.get("/read-endpoint")
+        def my_read_endpoint(db: Session = Depends(get_read_db)):
+            # Use db here for reads
     """
     db = SessionLocal()
     try:

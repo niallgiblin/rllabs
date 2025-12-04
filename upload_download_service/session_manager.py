@@ -34,9 +34,16 @@ from models import PresignedURL, UploadPart
 logger = logging.getLogger(__name__)
 
 # Redis for idempotency keys and rate limiting
-REDIS_HOST = os.getenv("REDIS_HOST", "redis")
+REDIS_HOST = os.getenv("REDIS_HOST", "redis-master")
 REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
-redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
+redis_client = redis.Redis(
+    host=REDIS_HOST, 
+    port=REDIS_PORT, 
+    password=REDIS_PASSWORD if REDIS_PASSWORD else None,
+    decode_responses=True,
+    socket_timeout=1.0  # Fast timeout
+)
 
 
 class SessionManager:
@@ -155,25 +162,28 @@ class SessionManager:
         # Initiate multipart upload with MinIO
         minio_upload_id = await self.storage.initiate_multipart_upload(temp_object_key)
         
-        # Generate presigned URLs for each part
-        presigned_urls = []
+        # Generate presigned URLs for each part in parallel
         expires_at = datetime.utcnow() + timedelta(hours=1)
         
-        for part_num in range(1, num_parts + 1):
+        async def generate_url(part_num: int):
+            """Helper function to generate a single presigned URL"""
             url = await self.storage.generate_presigned_upload_url(
                 object_key=temp_object_key,
                 upload_id=minio_upload_id,
                 part_number=part_num,
                 expires_in=3600  # 1 hour
             )
-            
-            presigned_urls.append(
-                PresignedURL(
-                    part_number=part_num,
-                    url=url,
-                    expires_at=expires_at.isoformat() + "Z"
-                )
+            return PresignedURL(
+                part_number=part_num,
+                url=url,
+                expires_at=expires_at.isoformat() + "Z"
             )
+        
+        # Generate all URLs concurrently using asyncio.gather()
+        import asyncio
+        presigned_urls = await asyncio.gather(*[
+            generate_url(part_num) for part_num in range(1, num_parts + 1)
+        ])
         
         # Create database record
         db_session = UploadSession(

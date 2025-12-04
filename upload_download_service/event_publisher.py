@@ -73,7 +73,10 @@ class EventPublisher:
                     port=self.rabbitmq_port,
                     credentials=credentials,
                     heartbeat=600,
-                    blocked_connection_timeout=300
+                    blocked_connection_timeout=300,
+                    connection_attempts=3,  # Retry up to 3 times
+                    retry_delay=1,  # 1 second between retries
+                    socket_timeout=5  # 5 second timeout per attempt
                 )
                 self._connection = pika.BlockingConnection(parameters)
                 self._channel = self._connection.channel()
@@ -94,7 +97,7 @@ class EventPublisher:
                 logger.info("✓ Connected to RabbitMQ")
                 
             except Exception as e:
-                logger.error(f"✗ Failed to connect to RabbitMQ: {e}")
+                logger.debug(f"✗ Failed to connect to RabbitMQ: {e}")  # Changed to debug to reduce log noise
                 self._connection = None
                 self._channel = None
     
@@ -207,13 +210,16 @@ class EventPublisher:
     def publish_training_job(self, message: dict):
         """
         Publish a training job message to RabbitMQ
+        
+        Returns:
+            bool: True if published successfully, False if RabbitMQ unavailable
         """
         try:
             self._ensure_connection() 
             
             if self._channel is None:  
-                logger.warning("RabbitMQ not available, training job not published")
-                raise Exception("RabbitMQ channel not available")
+                logger.warning("RabbitMQ not available, training job not published (fail-open)")
+                return False  # Fail-open: return False instead of raising exception
             
             self._channel.basic_publish(  
                 exchange='',
@@ -225,9 +231,11 @@ class EventPublisher:
                 )
             )
             logger.info(f"Published training job: {message['job_id']}")
+            return True
         except Exception as e:
             logger.error(f"Failed to publish training job: {e}")
-            raise
+            # Fail-open: log error but don't raise exception
+            return False
 
 
 
