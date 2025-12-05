@@ -26,6 +26,7 @@ import math
 import logging
 import redis
 import os
+import asyncio
 
 from database import UploadSession, UploadStatus
 from storage import StorageService
@@ -34,9 +35,103 @@ from models import PresignedURL, UploadPart
 logger = logging.getLogger(__name__)
 
 # Redis for idempotency keys and rate limiting
-REDIS_HOST = os.getenv("REDIS_HOST", "redis")
+REDIS_HOST = os.getenv("REDIS_HOST", "redis-master")
 REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
-redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
+REDIS_SENTINEL_HOSTS = os.getenv("REDIS_SENTINEL_HOSTS", "")
+REDIS_SENTINEL_MASTER_NAME = os.getenv("REDIS_SENTINEL_MASTER_NAME", "mymaster")
+
+# Try to use async Redis (redis[asyncio]), fallback to sync Redis with asyncio.to_thread
+try:
+    from redis.asyncio import Redis as AsyncRedis
+    from redis.sentinel import Sentinel as SyncSentinel
+    
+    # Initialize async Redis client with Sentinel support if configured
+    _async_redis_client = None
+    
+    async def get_async_redis_client():
+        """Get or create async Redis client"""
+        global _async_redis_client
+        if _async_redis_client is None:
+            if REDIS_SENTINEL_HOSTS and REDIS_SENTINEL_MASTER_NAME:
+                sentinel_hosts = []
+                for host_port in REDIS_SENTINEL_HOSTS.split(","):
+                    host_port = host_port.strip()
+                    if ":" in host_port:
+                        host, port = host_port.split(":")
+                        sentinel_hosts.append((host, int(port)))
+                    else:
+                        sentinel_hosts.append((host_port, 26379))
+                
+                # Create sync sentinel to get master address
+                sync_sentinel = SyncSentinel(
+                    sentinel_hosts,
+                    socket_timeout=1.0,
+                    socket_connect_timeout=1.0,
+                    password=REDIS_PASSWORD if REDIS_PASSWORD else None
+                )
+                master = sync_sentinel.master_for(REDIS_SENTINEL_MASTER_NAME)
+                # Get connection info for async client
+                master_host, master_port = master.connection_pool.connection_kwargs['host'], master.connection_pool.connection_kwargs['port']
+                
+                _async_redis_client = AsyncRedis.from_url(
+                    f"redis://{master_host}:{master_port}",
+                    password=REDIS_PASSWORD if REDIS_PASSWORD else None,
+                    decode_responses=True,
+                    socket_timeout=1.0
+                )
+                logger.info(f"✅ Async Redis connected via Sentinel, master: {REDIS_SENTINEL_MASTER_NAME}")
+            else:
+                _async_redis_client = AsyncRedis.from_url(
+                    f"redis://{REDIS_HOST}:{REDIS_PORT}",
+                    password=REDIS_PASSWORD if REDIS_PASSWORD else None,
+                    decode_responses=True,
+                    socket_timeout=1.0
+                )
+                logger.info(f"✅ Async Redis connected directly to {REDIS_HOST}:{REDIS_PORT}")
+        return _async_redis_client
+    
+    ASYNC_REDIS_AVAILABLE = True
+except ImportError:
+    ASYNC_REDIS_AVAILABLE = False
+    logger.warning("redis[asyncio] not available, using sync Redis with asyncio.to_thread (slower)")
+    
+    # Fallback: Initialize sync Redis client (will use asyncio.to_thread for async operations)
+    if REDIS_SENTINEL_HOSTS and REDIS_SENTINEL_MASTER_NAME:
+        from redis.sentinel import Sentinel
+        
+        sentinel_hosts = []
+        for host_port in REDIS_SENTINEL_HOSTS.split(","):
+            host_port = host_port.strip()
+            if ":" in host_port:
+                host, port = host_port.split(":")
+                sentinel_hosts.append((host, int(port)))
+            else:
+                sentinel_hosts.append((host_port, 26379))
+        
+        sentinel = Sentinel(
+            sentinel_hosts,
+            socket_timeout=1.0,
+            socket_connect_timeout=1.0,
+            password=REDIS_PASSWORD if REDIS_PASSWORD else None
+        )
+        
+        redis_client = sentinel.master_for(
+            REDIS_SENTINEL_MASTER_NAME,
+            password=REDIS_PASSWORD if REDIS_PASSWORD else None,
+            db=0,
+            decode_responses=True,
+            socket_timeout=1.0
+        )
+        logger.info(f"✅ Redis connected via Sentinel ({len(sentinel_hosts)} sentinels), master: {REDIS_SENTINEL_MASTER_NAME}")
+    else:
+        redis_client = redis.Redis(
+            host=REDIS_HOST, 
+            port=REDIS_PORT, 
+            password=REDIS_PASSWORD if REDIS_PASSWORD else None,
+            decode_responses=True,
+            socket_timeout=1.0
+        )
 
 
 class SessionManager:
@@ -80,8 +175,13 @@ class SessionManager:
         idempotency_key = f"upload:idempotency:{user_id}:{file_hash}"
         
         try:
-            # Check Redis for recent upload of this file
-            existing_upload_id = redis_client.get(idempotency_key)
+            # Check Redis for recent upload of this file (async)
+            if ASYNC_REDIS_AVAILABLE:
+                async_redis = await get_async_redis_client()
+                existing_upload_id = await async_redis.get(idempotency_key)
+            else:
+                # Fallback: use sync Redis with asyncio.to_thread
+                existing_upload_id = await asyncio.to_thread(redis_client.get, idempotency_key)
             
             if existing_upload_id:
                 # Found duplicate - fetch session from database
@@ -102,7 +202,7 @@ class SessionManager:
                         "artifact_id": session.file_hash
                     }
         
-        except redis.RedisError as e:
+        except (redis.RedisError, Exception) as e:
             # Redis is down - fail open (allow upload)
             logger.warning(f"Redis unavailable for idempotency check: {e}")
         
@@ -155,25 +255,28 @@ class SessionManager:
         # Initiate multipart upload with MinIO
         minio_upload_id = await self.storage.initiate_multipart_upload(temp_object_key)
         
-        # Generate presigned URLs for each part
-        presigned_urls = []
+        # Generate presigned URLs for each part in parallel
         expires_at = datetime.utcnow() + timedelta(hours=1)
         
-        for part_num in range(1, num_parts + 1):
+        async def generate_url(part_num: int):
+            """Helper function to generate a single presigned URL"""
             url = await self.storage.generate_presigned_upload_url(
                 object_key=temp_object_key,
                 upload_id=minio_upload_id,
                 part_number=part_num,
                 expires_in=3600  # 1 hour
             )
-            
-            presigned_urls.append(
-                PresignedURL(
-                    part_number=part_num,
-                    url=url,
-                    expires_at=expires_at.isoformat() + "Z"
-                )
+            return PresignedURL(
+                part_number=part_num,
+                url=url,
+                expires_at=expires_at.isoformat() + "Z"
             )
+        
+        # Generate all URLs concurrently using asyncio.gather()
+        import asyncio
+        presigned_urls = await asyncio.gather(*[
+            generate_url(part_num) for part_num in range(1, num_parts + 1)
+        ])
         
         # Create database record
         db_session = UploadSession(
@@ -193,11 +296,16 @@ class SessionManager:
         self.db.commit()
         self.db.refresh(db_session)
         
-        # Store idempotency key in Redis (expires in 24 hours)
+        # Store idempotency key in Redis (expires in 24 hours) - async
         try:
             idempotency_key = f"upload:idempotency:{user_id}:{file_hash}"
-            redis_client.setex(idempotency_key, 86400, upload_id)  # 24 hour TTL
-        except redis.RedisError as e:
+            if ASYNC_REDIS_AVAILABLE:
+                async_redis = await get_async_redis_client()
+                await async_redis.setex(idempotency_key, 86400, upload_id)  # 24 hour TTL
+            else:
+                # Fallback: use sync Redis with asyncio.to_thread
+                await asyncio.to_thread(redis_client.setex, idempotency_key, 86400, upload_id)
+        except (redis.RedisError, Exception) as e:
             logger.warning(f"Failed to set idempotency key: {e}")
             # Don't fail the upload if Redis is down
         
@@ -349,13 +457,25 @@ class SessionManager:
     
     async def abort_upload(self, upload_id: str, user_id: str):
         """
-        Abort an upload session
+        Abort an upload session (fast path - returns immediately)
+        
+        This method marks the session as aborted immediately and returns.
+        MinIO cleanup happens in the background via cleanup_minio_upload().
+        
+        Optimized for performance:
+        - Uses composite index (user_id, upload_id) for fast lookup
+        - Minimal database operations (only status and completed_at update)
+        - Fast commit with minimal transaction overhead
         
         Args:
             upload_id: Session ID to abort
             user_id: User aborting the upload
+        
+        Returns:
+            Tuple of (temp_object_key, minio_upload_id) for background cleanup
         """
-        # Fetch session
+        # Fetch session using composite index (idx_upload_sessions_user_id_upload_id)
+        # This is the fastest possible query - single indexed lookup
         session = self.db.query(UploadSession).filter(
             and_(
                 UploadSession.upload_id == upload_id,
@@ -369,20 +489,45 @@ class SessionManager:
         if session.status != UploadStatus.INITIATED:
             logger.warning(f"Attempting to abort upload {upload_id} in {session.status} state")
         
-        temp_object_key = f"temp/{upload_id}"
-        
-        # Abort multipart upload in MinIO
-        try:
-            await self.storage.abort_multipart_upload(temp_object_key, session.minio_upload_id)
-        except Exception as e:
-            logger.warning(f"Failed to abort multipart upload in MinIO: {e}")
-        
-        # Update session status
+        # Mark as aborted immediately (fast DB write - only 2 columns updated)
+        # Use minimal transaction - only update what's necessary
         session.status = UploadStatus.ABORTED
         session.completed_at = datetime.now(timezone.utc)
+        
+        # Fast commit - connection pool handles connection reuse
         self.db.commit()
         
-        logger.info(f"Upload {upload_id} aborted")
+        logger.info(f"Upload {upload_id} marked as aborted (cleanup will happen in background)")
+        
+        # Return cleanup info for background task
+        temp_object_key = f"temp/{upload_id}"
+        return (temp_object_key, session.minio_upload_id)
+    
+    async def cleanup_minio_upload(self, temp_object_key: str, minio_upload_id: str):
+        """
+        Background cleanup of MinIO multipart upload (non-blocking)
+        
+        This method is called in the background after abort_upload() returns.
+        It handles the slow MinIO cleanup operation without blocking the request.
+        Added timeout to prevent hanging if MinIO is slow.
+        
+        Args:
+            temp_object_key: S3 key for the temporary object
+            minio_upload_id: MinIO's multipart upload ID
+        """
+        import asyncio
+        try:
+            # Add timeout to prevent hanging (5 seconds max for cleanup)
+            await asyncio.wait_for(
+                self.storage.abort_multipart_upload(temp_object_key, minio_upload_id),
+                timeout=5.0
+            )
+            logger.info(f"Background cleanup completed for {temp_object_key}")
+        except asyncio.TimeoutError:
+            logger.warning(f"Background cleanup timed out for {temp_object_key} (MinIO may be slow)")
+        except Exception as e:
+            logger.warning(f"Background cleanup failed for {temp_object_key}: {e}")
+            # Don't raise - cleanup failure is acceptable, session is already marked as aborted
     
     async def fail_upload(self, upload_id: str, error_message: str):
         """

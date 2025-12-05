@@ -1,0 +1,90 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: collaboration-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: collaboration-service
+  template:
+    metadata:
+      labels:
+        app: collaboration-service
+    spec:
+      containers:
+        - name: collaboration-service
+          image: collaboration-service
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          env:
+            # Observability Configuration
+            - name: OTEL_SERVICE_NAME
+              value: "collaboration-service"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://jaeger:4317"
+            - name: TRACING_ENABLED
+              value: "true"
+            - name: LOG_LEVEL
+              value: "INFO"
+            - name: MONGO_URI
+              # Using FQDN for reliable DNS resolution
+              # Short names (mongodb-0.mongodb) should also work within the same namespace
+              value: "mongodb://mongodb-0.mongodb.default.svc.cluster.local:27017,mongodb-1.mongodb.default.svc.cluster.local:27017,mongodb-2.mongodb.default.svc.cluster.local:27017/?replicaSet=rs0"
+            - name: REDIS_HOST
+              value: "redis-master"
+            - name: REDIS_PORT
+              value: "6379"
+            - name: REDIS_PASSWORD
+              value: "redis_password"
+            - name: REDIS_SENTINEL_HOSTS
+              value: "redis-sentinel-0:26379,redis-sentinel-1:26379,redis-sentinel-2:26379"
+            - name: REDIS_SENTINEL_MASTER_NAME
+              value: "mymaster"
+            - name: RABBITMQ_HOST
+              value: "rabbitmq"
+            - name: RABBITMQ_PORT
+              value: "5672"
+            - name: RABBITMQ_USER
+              value: "admin"
+            - name: RABBITMQ_PASS
+              value: "admin_password"
+            - name: MODEL_CATALOG_URL
+              value: "http://model-catalog-service:8000"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 15        # Reduced from 5s to match other services
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 30        # Reduced from 10s to match other services
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"  # Increased from 128Mi to prevent OOM kills
+            limits:
+              cpu: "200m"
+              memory: "512Mi"  # Increased from 256Mi (2x requests, 100% headroom)
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: collaboration-service
+spec:
+  selector:
+    app: collaboration-service
+  ports:
+    - protocol: TCP
+      port: 8000
+      targetPort: 8000
+

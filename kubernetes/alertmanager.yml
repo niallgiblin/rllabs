@@ -1,0 +1,159 @@
+# Alertmanager Deployment
+# ========================
+# Receives alerts from Prometheus and routes them to notification channels
+#
+# Features:
+# - Alert grouping (reduces noise)
+# - Alert silencing
+# - Multiple notification receivers (Slack, email, PagerDuty, etc.)
+# - Alert routing based on labels
+#
+# Access via: kubectl port-forward svc/alertmanager 9093:9093
+# UI: http://localhost:9093
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: alertmanager-config
+data:
+  alertmanager.yml: |
+    global:
+      # Global timeout for resolving alerts
+      resolve_timeout: 5m
+    
+    # Route tree - how alerts are routed to receivers
+    route:
+      # Default receiver
+      receiver: 'default-receiver'
+      
+      # Group alerts by these labels
+      group_by: ['alertname', 'service', 'severity']
+      
+      # Wait before sending first notification for a group
+      group_wait: 30s
+      
+      # Wait before sending subsequent notifications
+      group_interval: 5m
+      
+      # Wait before resending a notification
+      repeat_interval: 4h
+      
+      # Child routes for specific alert types
+      routes:
+        # Critical alerts go to critical receiver
+        - match:
+            severity: critical
+          receiver: 'critical-receiver'
+          continue: true
+        
+        # Database alerts
+        - match:
+            category: database
+          receiver: 'database-receiver'
+          group_by: ['alertname', 'db_instance']
+        
+        # Infrastructure alerts
+        - match:
+            category: infrastructure
+          receiver: 'infra-receiver'
+    
+    # Receivers - notification endpoints
+    receivers:
+      - name: 'default-receiver'
+        # Webhook for development (can be changed to Slack/PagerDuty in production)
+        webhook_configs:
+          - url: 'http://localhost:5001/webhook'
+            send_resolved: true
+      
+      - name: 'critical-receiver'
+        # For production, configure Slack or PagerDuty here
+        # slack_configs:
+        #   - api_url: 'https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK'
+        #     channel: '#alerts-critical'
+        #     title: '{{ .GroupLabels.alertname }}'
+        #     text: '{{ range .Alerts }}{{ .Annotations.summary }}{{ end }}'
+        webhook_configs:
+          - url: 'http://localhost:5001/webhook/critical'
+            send_resolved: true
+      
+      - name: 'database-receiver'
+        webhook_configs:
+          - url: 'http://localhost:5001/webhook/database'
+            send_resolved: true
+      
+      - name: 'infra-receiver'
+        webhook_configs:
+          - url: 'http://localhost:5001/webhook/infra'
+            send_resolved: true
+    
+    # Inhibition rules - suppress certain alerts when others are firing
+    inhibit_rules:
+      # If service is down, suppress high latency alerts
+      - source_match:
+          alertname: 'ServiceDown'
+        target_match:
+          alertname: 'HighLatency'
+        equal: ['service']
+      
+      # If node is down, suppress pod alerts on that node
+      - source_match:
+          severity: 'critical'
+        target_match:
+          severity: 'warning'
+        equal: ['alertname']
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alertmanager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: alertmanager
+  template:
+    metadata:
+      labels:
+        app: alertmanager
+    spec:
+      containers:
+        - name: alertmanager
+          image: prom/alertmanager:v0.26.0
+          args:
+            - '--config.file=/etc/alertmanager/alertmanager.yml'
+            - '--storage.path=/alertmanager'
+            - '--web.external-url=http://localhost:9093'
+          ports:
+            - containerPort: 9093
+          volumeMounts:
+            - name: alertmanager-config
+              mountPath: /etc/alertmanager
+            - name: alertmanager-storage
+              mountPath: /alertmanager
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+      volumes:
+        - name: alertmanager-config
+          configMap:
+            name: alertmanager-config
+        - name: alertmanager-storage
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alertmanager
+spec:
+  selector:
+    app: alertmanager
+  ports:
+    - protocol: TCP
+      port: 9093
+      targetPort: 9093
+  type: ClusterIP
+

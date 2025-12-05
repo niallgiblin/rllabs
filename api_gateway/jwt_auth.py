@@ -3,6 +3,9 @@ from datetime import datetime, timedelta
 from fastapi import HTTPException, status, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Optional, List, Dict
+from functools import lru_cache
+import hashlib
+import time
 
 # Configuration for JWT
 SECRET_KEY = "your-secret-key"  # In production, load from env vars
@@ -10,6 +13,15 @@ ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
 bearer_scheme = HTTPBearer(auto_error=False)
+
+# JWT verification cache (in-memory LRU cache)
+# Cache key: SHA-256 hash of token (for security, not storing tokens)
+# Cache value: (payload, expiration_timestamp)
+# TTL: Token expiration time (from JWT payload)
+_jwt_cache: Dict[str, tuple] = {}
+_jwt_cache_max_size = 1000  # Max 1000 cached tokens
+_jwt_cache_cleanup_interval = 300  # Clean up expired tokens every 5 minutes
+_last_cache_cleanup = time.time()
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     """
@@ -24,13 +36,75 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
+def _get_token_hash(token: str) -> str:
+    """Get SHA-256 hash of token for cache key (security: don't store tokens)"""
+    return hashlib.sha256(token.encode()).hexdigest()
+
+def _cleanup_expired_tokens():
+    """Remove expired tokens from cache (periodic cleanup)"""
+    global _last_cache_cleanup
+    current_time = time.time()
+    
+    # Only cleanup every N seconds to avoid overhead
+    if current_time - _last_cache_cleanup < _jwt_cache_cleanup_interval:
+        return
+    
+    _last_cache_cleanup = current_time
+    expired_keys = [
+        key for key, (_, exp_time) in _jwt_cache.items()
+        if exp_time < current_time
+    ]
+    for key in expired_keys:
+        _jwt_cache.pop(key, None)
+
 def verify_token(token: str) -> dict:
     """
     Verifies a JWT token and returns its payload.
+    Uses in-memory LRU cache to avoid re-verifying the same token.
+    
     Raises HTTPException if the token is invalid or expired.
     """
+    # Get cache key (hash of token for security)
+    cache_key = _get_token_hash(token)
+    current_time = time.time()
+    
+    # Check cache first
+    if cache_key in _jwt_cache:
+        payload, exp_time = _jwt_cache[cache_key]
+        # Check if token is still valid (not expired)
+        if exp_time > current_time:
+            return payload
+        else:
+            # Token expired, remove from cache
+            _jwt_cache.pop(cache_key, None)
+    
+    # Cache miss or expired - verify token
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        
+        # Extract expiration time from payload
+        exp_timestamp = payload.get("exp")
+        if exp_timestamp:
+            exp_time = float(exp_timestamp)
+        else:
+            # No expiration in payload, use default TTL
+            exp_time = current_time + (ACCESS_TOKEN_EXPIRE_MINUTES * 60)
+        
+        # Only cache if token is not expired
+        if exp_time > current_time:
+            # Cleanup expired tokens periodically
+            _cleanup_expired_tokens()
+            
+            # Enforce max cache size (LRU eviction)
+            if len(_jwt_cache) >= _jwt_cache_max_size:
+                # Remove oldest 10% of entries (simple eviction)
+                sorted_items = sorted(_jwt_cache.items(), key=lambda x: x[1][1])
+                for key, _ in sorted_items[:max(1, _jwt_cache_max_size // 10)]:
+                    _jwt_cache.pop(key, None)
+            
+            # Cache the verified token
+            _jwt_cache[cache_key] = (payload, exp_time)
+        
         return payload
     except jwt.ExpiredSignatureError:
         raise HTTPException(

@@ -1,0 +1,314 @@
+# PostgreSQL High Availability Configuration
+# Primary + 2 Read Replicas with streaming replication
+# Demonstrates: Database replication, read scaling, failover
+
+---
+# ConfigMap for PostgreSQL configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-ha-config
+data:
+  # Primary configuration
+  primary-postgresql.conf: |
+    listen_addresses = '*'
+    wal_level = replica
+    max_wal_senders = 5
+    max_replication_slots = 5
+    hot_standby = on
+    archive_mode = on
+    archive_command = '/bin/true'
+  
+  # pg_hba.conf additions for replication
+  pg_hba_replication.conf: |
+    # Replication connections
+    host replication replicator all md5
+    host all all all md5
+
+---
+# Primary PostgreSQL StatefulSet
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres-primary
+spec:
+  serviceName: postgres-primary
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+      role: primary
+  template:
+    metadata:
+      labels:
+        app: postgres
+        role: primary
+    spec:
+      initContainers:
+        - name: init-config
+          image: postgres:13
+          command:
+            - bash
+            - -c
+            - |
+              # This runs before postgres starts
+              echo "Setting up primary configuration..."
+              mkdir -p /var/lib/postgresql/data/pgdata
+              
+              # Create init script that will run on first startup
+              mkdir -p /docker-entrypoint-initdb.d
+              cat > /docker-entrypoint-initdb.d/init-replication.sh << 'INITEOF'
+              #!/bin/bash
+              set -e
+              
+              echo "Creating replication user..."
+              psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-EOSQL
+                DO \$\$
+                BEGIN
+                  IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'replicator') THEN
+                    CREATE ROLE replicator WITH REPLICATION LOGIN PASSWORD 'replicator_password';
+                  END IF;
+                END
+                \$\$;
+              EOSQL
+              
+              echo "Creating application databases..."
+              for db in model_catalog_db upload_download_db collaboration_db; do
+                psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" -tc "SELECT 1 FROM pg_database WHERE datname = '$db'" | grep -q 1 || \
+                  psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" -c "CREATE DATABASE $db;"
+              done
+              
+              echo "Configuring pg_hba.conf for replication..."
+              echo "host replication replicator all md5" >> "$PGDATA/pg_hba.conf"
+              echo "host all all all md5" >> "$PGDATA/pg_hba.conf"
+              
+              echo "Reloading configuration..."
+              pg_ctl reload -D "$PGDATA" || true
+              
+              echo "Primary initialization complete!"
+              INITEOF
+              chmod +x /docker-entrypoint-initdb.d/init-replication.sh
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+            - name: init-scripts
+              mountPath: /docker-entrypoint-initdb.d
+      containers:
+        - name: postgres
+          image: postgres:13
+          args:
+            - -c
+            - wal_level=replica
+            - -c
+            - max_wal_senders=5
+            - -c
+            - max_replication_slots=5
+            - -c
+            - hot_standby=on
+            - -c
+            - max_connections=300
+            - -c
+            - shared_buffers=256MB
+            - -c
+            - effective_cache_size=768MB
+            - -c
+            - work_mem=16MB
+            - -c
+            - maintenance_work_mem=128MB
+          env:
+            - name: POSTGRES_USER
+              value: "rllabs"
+            - name: POSTGRES_PASSWORD
+              value: "rllabs_password"
+            - name: POSTGRES_DB
+              value: "postgres"
+            - name: PGDATA
+              value: "/var/lib/postgresql/data/pgdata"
+          ports:
+            - containerPort: 5432
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+            - name: init-scripts
+              mountPath: /docker-entrypoint-initdb.d
+          resources:
+            requests:
+              cpu: "500m"      # Increased from 100m for better query performance
+              memory: "512Mi"  # Increased from 256Mi for larger shared_buffers
+            limits:
+              cpu: "1000m"     # Increased from 500m to handle concurrent queries
+              memory: "1Gi"    # Increased from 512Mi for better performance
+          readinessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - rllabs
+                - -d
+                - postgres
+            initialDelaySeconds: 15
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - rllabs
+                - -d
+                - postgres
+            initialDelaySeconds: 30
+            periodSeconds: 10
+      volumes:
+        - name: init-scripts
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: postgres-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
+
+---
+# Read Replica StatefulSet
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres-replica
+spec:
+  serviceName: postgres-replica
+  replicas: 2
+  selector:
+    matchLabels:
+      app: postgres
+      role: replica
+  template:
+    metadata:
+      labels:
+        app: postgres
+        role: replica
+    spec:
+      initContainers:
+        - name: init-replica
+          image: postgres:13
+          command:
+            - bash
+            - -c
+            - |
+              set -e
+              echo "Waiting for primary to be ready and configured..."
+              
+              # Wait for primary to be accepting connections
+              until pg_isready -h postgres-primary -U rllabs -d postgres; do
+                echo "Primary not ready, waiting..."
+                sleep 3
+              done
+              
+              # Wait for replicator user to exist (primary init must complete)
+              echo "Waiting for replicator user to be created..."
+              for i in {1..30}; do
+                if PGPASSWORD=rllabs_password psql -h postgres-primary -U rllabs -d postgres -tc "SELECT 1 FROM pg_roles WHERE rolname='replicator'" 2>/dev/null | grep -q 1; then
+                  echo "Replicator user exists!"
+                  break
+                fi
+                echo "Replicator user not found yet, waiting... ($i/30)"
+                sleep 5
+              done
+              
+              # Check if already initialized
+              if [ -f /var/lib/postgresql/data/pgdata/PG_VERSION ]; then
+                echo "Replica already initialized, skipping pg_basebackup"
+                exit 0
+              fi
+              
+              echo "Initializing replica from primary..."
+              PGPASSWORD=replicator_password pg_basebackup \
+                -h postgres-primary \
+                -U replicator \
+                -D /var/lib/postgresql/data/pgdata \
+                -Fp -Xs -P -R -v
+              
+              echo "Replica initialization complete!"
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+      containers:
+        - name: postgres
+          image: postgres:13
+          args:
+            - -c
+            - hot_standby=on
+            - -c
+            - max_connections=300
+            - -c
+            - shared_buffers=128MB
+            - -c
+            - effective_cache_size=384MB
+            - -c
+            - work_mem=16MB
+          env:
+            - name: POSTGRES_USER
+              value: "rllabs"
+            - name: POSTGRES_PASSWORD
+              value: "rllabs_password"
+            - name: PGDATA
+              value: "/var/lib/postgresql/data/pgdata"
+          ports:
+            - containerPort: 5432
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+          resources:
+            requests:
+              cpu: "300m"      # Increased from 100m for replica read performance
+              memory: "256Mi"  # Keep same for replicas
+            limits:
+              cpu: "500m"      # Keep same for replicas (read-only)
+              memory: "512Mi"  # Keep same for replicas
+          readinessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - rllabs
+                - -d
+                - postgres
+            initialDelaySeconds: 10
+            periodSeconds: 5
+  volumeClaimTemplates:
+    - metadata:
+        name: postgres-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
+
+---
+# Primary Service (for writes)
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-primary
+spec:
+  selector:
+    app: postgres
+    role: primary
+  ports:
+    - port: 5432
+      targetPort: 5432
+
+---
+# Replica Service (for reads)
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-replica
+spec:
+  selector:
+    app: postgres
+    role: replica
+  ports:
+    - port: 5432
+      targetPort: 5432

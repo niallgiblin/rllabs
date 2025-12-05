@@ -7,7 +7,7 @@ sqlalchemy==2.0.23
 psycopg2-binary==2.9.9
 
 # Redis for idempotency and caching
-redis==5.0.1
+redis[asyncio]>=5.0.1  # Async Redis client for non-blocking operations (includes asyncio support)
 
 # S3/MinIO client with async support
 aioboto3
@@ -26,3 +26,17 @@ pydantic-settings==2.1.0
 # Python utilities
 python-multipart==0.0.6
 requests==2.31.0
+
+# Observability - Metrics
+prometheus-fastapi-instrumentator==6.1.0
+
+# Observability - Structured Logging & Distributed Tracing
+python-json-logger>=2.0.7
+opentelemetry-api>=1.21.0
+opentelemetry-sdk>=1.21.0
+opentelemetry-exporter-otlp>=1.21.0
+opentelemetry-instrumentation-fastapi>=0.42b0
+opentelemetry-instrumentation-httpx>=0.42b0
+opentelemetry-instrumentation-sqlalchemy>=0.42b0
+opentelemetry-instrumentation-redis>=0.42b0
+opentelemetry-instrumentation-pika>=0.42b0

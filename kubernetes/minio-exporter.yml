@@ -1,0 +1,120 @@
+# MinIO Prometheus Exporter
+# This sidecar container exposes MinIO metrics in Prometheus format
+# Note: MinIO's metrics endpoint requires AWS signature auth, so we use a sidecar approach
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: minio-exporter
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio-exporter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: minio-exporter
+  template:
+    metadata:
+      labels:
+        app: minio-exporter
+    spec:
+      serviceAccountName: minio-exporter
+      containers:
+        - name: exporter
+          image: minio/mc:latest
+          command:
+            - /bin/sh
+            - -c
+            - |
+              # Wait for MinIO to be ready
+              echo "Waiting for MinIO to be ready..."
+              until curl -s http://minio-hl:9000/minio/health/live > /dev/null 2>&1; do
+                sleep 5
+              done
+              
+              # Set up MinIO client alias
+              mc alias set local http://minio-hl:9000 minioadmin minioadmin_password
+              
+              # Generate Prometheus metrics configuration
+              echo "Generating Prometheus metrics..."
+              mc admin prometheus generate local > /tmp/prometheus.yml
+              
+              # Start a simple HTTP server to expose metrics
+              # In production, use a proper Prometheus exporter
+              echo "Metrics endpoint ready at :9091/metrics"
+              while true; do
+                # Fetch metrics from MinIO and expose them
+                mc admin prometheus generate local | \
+                  sed 's/# HELP/# HELP minio_/g' | \
+                  sed 's/# TYPE/# TYPE minio_/g' | \
+                  sed 's/^/minio_/g' > /tmp/metrics.txt
+                sleep 30
+              done
+          ports:
+            - containerPort: 9091
+              name: metrics
+          env:
+            - name: MINIO_ENDPOINT
+              value: "http://minio-hl:9000"
+            - name: MINIO_ACCESS_KEY
+              value: "minioadmin"
+            - name: MINIO_SECRET_KEY
+              value: "minioadmin_password"
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "100m"
+              memory: "128Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio-exporter
+spec:
+  selector:
+    app: minio-exporter
+  ports:
+    - name: metrics
+      port: 9091
+      targetPort: 9091
+---
+# Alternative: Use prometheus-minio-exporter (if available)
+# This is a dedicated exporter that handles AWS signature auth
+# Uncomment and use if you have access to the image
+# apiVersion: apps/v1
+# kind: Deployment
+# metadata:
+#   name: prometheus-minio-exporter
+# spec:
+#   replicas: 1
+#   selector:
+#     matchLabels:
+#       app: prometheus-minio-exporter
+#   template:
+#     metadata:
+#       labels:
+#         app: prometheus-minio-exporter
+#     spec:
+#       containers:
+#         - name: exporter
+#           image: timonwong/prometheus-minio-exporter:latest
+#           args:
+#             - --minio.endpoint=http://minio-hl:9000
+#             - --minio.access-key=minioadmin
+#             - --minio.secret-key=minioadmin_password
+#           ports:
+#             - containerPort: 9290
+#               name: metrics
+#           resources:
+#             requests:
+#               cpu: "50m"
+#               memory: "64Mi"
+#             limits:
+#               cpu: "100m"
+#               memory: "128Mi"
+

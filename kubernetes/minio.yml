@@ -42,15 +42,14 @@ spec:
             failureThreshold: 5
           resources:
             requests:
-              cpu: "100m"
+              cpu: "200m"
               memory: "128Mi"
             limits:
-              cpu: "200m"
+              cpu: "1000m"
               memory: "256Mi"
       volumes:
         - name: minio-storage
-          persistentVolumeClaim:
-            claimName: minio-pvc
+          emptyDir: {}  # Changed from PVC to emptyDir to avoid quota issues
 ---
 apiVersion: v1
 kind: Service
@@ -68,14 +67,3 @@ spec:
       protocol: TCP
       port: 9001
       targetPort: 9001
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: minio-pvc
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 1Gi

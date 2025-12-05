@@ -1,0 +1,338 @@
+"""
+Distributed Tracing Module
+==========================
+
+Provides OpenTelemetry-based distributed tracing with Jaeger export.
+
+This module sets up:
+1. Automatic FastAPI instrumentation (creates spans for all HTTP requests)
+2. Automatic httpx instrumentation (traces outgoing HTTP calls)
+3. Automatic SQLAlchemy instrumentation (traces database queries)
+4. Trace context propagation (W3C Trace Context headers)
+
+How Distributed Tracing Works:
+------------------------------
+1. When a request enters the API Gateway, a unique trace_id is generated
+2. This trace_id is propagated via headers (traceparent) to downstream services
+3. Each service creates "spans" representing operations (HTTP calls, DB queries)
+4. All spans with the same trace_id are collected and visualized in Jaeger
+
+Usage:
+    from shared.observability import setup_tracing, get_tracer
+    
+    # At service startup (before FastAPI app is created)
+    setup_tracing(service_name="api-gateway")
+    
+    # In your code (for custom spans)
+    tracer = get_tracer(__name__)
+    
+    with tracer.start_as_current_span("custom_operation") as span:
+        span.set_attribute("user.id", user_id)
+        # ... your code ...
+
+Environment Variables:
+    OTEL_EXPORTER_OTLP_ENDPOINT: Jaeger OTLP endpoint (default: http://jaeger:4317)
+    OTEL_TRACES_SAMPLER: Sampling strategy (default: always_on)
+    TRACING_ENABLED: Set to "false" to disable tracing
+"""
+
+import os
+import logging
+from typing import Optional
+from contextlib import contextmanager
+
+logger = logging.getLogger(__name__)
+
+# Global tracer provider (set by setup_tracing)
+_tracer_provider = None
+_initialized = False
+
+
+def setup_tracing(
+    service_name: str,
+    jaeger_endpoint: Optional[str] = None,
+    sample_rate: float = 1.0
+) -> bool:
+    """
+    Configure distributed tracing with Jaeger export.
+    
+    Call this once at service startup, BEFORE creating the FastAPI app.
+    
+    Args:
+        service_name: Name of the service (e.g., "api-gateway")
+        jaeger_endpoint: OTLP endpoint for Jaeger (default from env or http://jaeger:4317)
+        sample_rate: Fraction of traces to sample (0.0 to 1.0, default 1.0 = all)
+    
+    Returns:
+        True if tracing was initialized, False if disabled or unavailable
+    
+    Example:
+        # At the very start of main.py
+        from shared.observability import setup_tracing
+        
+        setup_tracing(service_name="api-gateway")
+        
+        app = FastAPI(...)  # Now auto-instrumented!
+    """
+    global _tracer_provider, _initialized
+    
+    # Check if tracing is disabled
+    if os.getenv("TRACING_ENABLED", "true").lower() == "false":
+        logger.info("Distributed tracing is disabled (TRACING_ENABLED=false)")
+        return False
+    
+    # Avoid double initialization
+    # Check if tracing is disabled via environment variable
+    if os.getenv("TRACING_ENABLED", "true").lower() == "false":
+        logger.info("Tracing disabled via TRACING_ENABLED=false")
+        return False
+    
+    if _initialized:
+        logger.warning("Tracing already initialized, skipping")
+        return True
+    
+    try:
+        from opentelemetry import trace
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import BatchSpanProcessor
+        from opentelemetry.sdk.resources import Resource, SERVICE_NAME
+        from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+        from opentelemetry.sdk.trace.sampling import TraceIdRatioBased
+        
+        # Get Jaeger endpoint from env or parameter
+        endpoint = jaeger_endpoint or os.getenv(
+            "OTEL_EXPORTER_OTLP_ENDPOINT",
+            "http://jaeger:4317"
+        )
+        
+        # Create resource with service name
+        resource = Resource.create({
+            SERVICE_NAME: service_name,
+            "deployment.environment": os.getenv("ENVIRONMENT", "development")
+        })
+        
+        # Create sampler (controls what percentage of traces are recorded)
+        sampler = TraceIdRatioBased(sample_rate)
+        
+        # Create and configure tracer provider
+        _tracer_provider = TracerProvider(
+            resource=resource,
+            sampler=sampler
+        )
+        
+        # Create OTLP exporter (sends spans to Jaeger)
+        # Add timeout to prevent hanging on slow/unavailable Jaeger
+        otlp_exporter = OTLPSpanExporter(
+            endpoint=endpoint,
+            insecure=True,  # Use insecure for local/Kind cluster
+            timeout=1.0  # 1 second timeout - fail fast if Jaeger is slow
+        )
+        
+        # Add batch processor with error handling
+        # max_queue_size: Maximum number of spans to queue before dropping
+        # export_timeout_millis: Timeout for export operations
+        _tracer_provider.add_span_processor(
+            BatchSpanProcessor(
+                otlp_exporter,
+                max_queue_size=2048,  # Queue up to 2048 spans
+                export_timeout_millis=1000,  # 1 second export timeout
+                schedule_delay_millis=5000  # Batch every 5 seconds
+            )
+        )
+        
+        # Set as global tracer provider
+        trace.set_tracer_provider(_tracer_provider)
+        
+        # Auto-instrument common libraries
+        _instrument_libraries()
+        
+        _initialized = True
+        logger.info(
+            f"Distributed tracing initialized",
+            extra={
+                "event": "tracing_initialized",
+                "jaeger_endpoint": endpoint,
+                "sample_rate": sample_rate
+            }
+        )
+        
+        return True
+        
+    except ImportError as e:
+        logger.warning(
+            f"OpenTelemetry packages not installed, tracing disabled: {e}"
+        )
+        return False
+    except Exception as e:
+        logger.error(f"Failed to initialize tracing: {e}")
+        return False
+
+
+def _instrument_libraries() -> None:
+    """
+    Auto-instrument common libraries for automatic span creation.
+    
+    This adds tracing to:
+    - FastAPI (incoming HTTP requests)
+    - httpx (outgoing HTTP requests)
+    - SQLAlchemy (database queries)
+    - Redis (cache operations)
+    - pika (RabbitMQ operations)
+    """
+    
+    # Instrument FastAPI
+    try:
+        from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+        FastAPIInstrumentor().instrument()
+        logger.debug("FastAPI auto-instrumentation enabled")
+    except ImportError:
+        logger.debug("FastAPI instrumentation not available")
+    except Exception as e:
+        logger.warning(f"Failed to instrument FastAPI: {e}")
+    
+    # Instrument httpx (for outgoing HTTP calls)
+    try:
+        from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+        HTTPXClientInstrumentor().instrument()
+        logger.debug("httpx auto-instrumentation enabled")
+    except ImportError:
+        logger.debug("httpx instrumentation not available")
+    except Exception as e:
+        logger.warning(f"Failed to instrument httpx: {e}")
+    
+    # Instrument SQLAlchemy (database queries)
+    try:
+        from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
+        SQLAlchemyInstrumentor().instrument()
+        logger.debug("SQLAlchemy auto-instrumentation enabled")
+    except ImportError:
+        logger.debug("SQLAlchemy instrumentation not available")
+    except Exception as e:
+        logger.warning(f"Failed to instrument SQLAlchemy: {e}")
+    
+    # Instrument Redis
+    try:
+        from opentelemetry.instrumentation.redis import RedisInstrumentor
+        RedisInstrumentor().instrument()
+        logger.debug("Redis auto-instrumentation enabled")
+    except ImportError:
+        logger.debug("Redis instrumentation not available")
+    except Exception as e:
+        logger.warning(f"Failed to instrument Redis: {e}")
+    
+    # Instrument pika (RabbitMQ)
+    try:
+        from opentelemetry.instrumentation.pika import PikaInstrumentor
+        PikaInstrumentor().instrument()
+        logger.debug("Pika (RabbitMQ) auto-instrumentation enabled")
+    except ImportError:
+        logger.debug("Pika instrumentation not available")
+    except Exception as e:
+        logger.warning(f"Failed to instrument Pika: {e}")
+
+
+def get_tracer(name: str):
+    """
+    Get a tracer instance for creating custom spans.
+    
+    Use this when you want to trace specific operations beyond
+    the auto-instrumented ones (HTTP, DB, etc.)
+    
+    Args:
+        name: Tracer name (typically __name__)
+    
+    Returns:
+        OpenTelemetry Tracer instance, or NoOpTracer if tracing disabled
+    
+    Example:
+        tracer = get_tracer(__name__)
+        
+        with tracer.start_as_current_span("process_file") as span:
+            span.set_attribute("file.size", file_size)
+            span.set_attribute("file.name", filename)
+            # ... process file ...
+    """
+    try:
+        from opentelemetry import trace
+        return trace.get_tracer(name)
+    except ImportError:
+        # Return a no-op tracer if OpenTelemetry not installed
+        return _NoOpTracer()
+
+
+class _NoOpTracer:
+    """No-op tracer for when OpenTelemetry is not available."""
+    
+    @contextmanager
+    def start_as_current_span(self, name: str, **kwargs):
+        yield _NoOpSpan()
+    
+    def start_span(self, name: str, **kwargs):
+        return _NoOpSpan()
+
+
+class _NoOpSpan:
+    """No-op span for when OpenTelemetry is not available."""
+    
+    def set_attribute(self, key: str, value) -> None:
+        pass
+    
+    def set_status(self, status) -> None:
+        pass
+    
+    def record_exception(self, exception) -> None:
+        pass
+    
+    def end(self) -> None:
+        pass
+    
+    def __enter__(self):
+        return self
+    
+    def __exit__(self, *args):
+        pass
+
+
+def inject_trace_context(headers: dict) -> dict:
+    """
+    Inject trace context into outgoing request headers.
+    
+    Use this when making HTTP calls without httpx (which is auto-instrumented).
+    
+    Args:
+        headers: Existing headers dict to modify
+    
+    Returns:
+        Headers dict with trace context added
+    
+    Example:
+        headers = {"Authorization": "Bearer ..."}
+        headers = inject_trace_context(headers)
+        response = requests.get(url, headers=headers)
+    """
+    try:
+        from opentelemetry.propagate import inject
+        inject(headers)
+    except ImportError:
+        pass
+    return headers
+
+
+def extract_trace_context(headers: dict):
+    """
+    Extract trace context from incoming request headers.
+    
+    Typically not needed as FastAPI instrumentation handles this automatically.
+    
+    Args:
+        headers: Request headers dict
+    
+    Returns:
+        OpenTelemetry Context object
+    """
+    try:
+        from opentelemetry.propagate import extract
+        return extract(headers)
+    except ImportError:
+        return None
+

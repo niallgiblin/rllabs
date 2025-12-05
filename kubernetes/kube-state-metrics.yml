@@ -1,0 +1,61 @@
+# Optional: Install kube-state-metrics for pod/container metrics
+# This enables pod count, CPU, and memory metrics in Grafana
+#
+# To install:
+#   kubectl apply -f kubernetes/kube-state-metrics.yml
+#
+# Note: This is optional - application metrics work without it
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kube-state-metrics
+  namespace: kube-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kube-state-metrics
+  namespace: kube-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kube-state-metrics
+  template:
+    metadata:
+      labels:
+        app: kube-state-metrics
+    spec:
+      serviceAccountName: kube-state-metrics
+      containers:
+        - name: kube-state-metrics
+          image: registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.10.0
+          ports:
+            - containerPort: 8080
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kube-state-metrics
+  namespace: kube-system
+spec:
+  selector:
+    app: kube-state-metrics
+  ports:
+    - port: 8080
+      targetPort: 8080
+---
+# Update Prometheus config to scrape kube-state-metrics
+# Add this to prometheus.yml scrape_configs:
+# - job_name: 'kube-state-metrics'
+#   static_configs:
+#     - targets: ['kube-state-metrics.kube-system:8080']
+

@@ -1,0 +1,292 @@
+# Prometheus Alerting Rules
+# ==========================
+# These rules define conditions that trigger alerts to Alertmanager
+#
+# Based on the Four Golden Signals:
+# 1. Latency - How long requests take
+# 2. Traffic - Request rate
+# 3. Errors - Error rate
+# 4. Saturation - Resource utilization
+#
+# Apply with: kubectl apply -f prometheus-alerts.yml
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-alerts
+data:
+  alerts.yml: |
+    groups:
+      # ===========================================
+      # Application Service Alerts (Four Golden Signals)
+      # ===========================================
+      - name: service-alerts
+        rules:
+          # LATENCY: High P95 latency
+          - alert: HighLatencyP95
+            expr: |
+              histogram_quantile(0.95, 
+                sum(rate(http_request_duration_seconds_bucket[5m])) by (job, le)
+              ) > 1.0
+            for: 5m
+            labels:
+              severity: warning
+              category: performance
+            annotations:
+              summary: "High P95 latency on {{ $labels.job }}"
+              description: "P95 latency is {{ $value | humanizeDuration }} (threshold: 1s)"
+              runbook_url: "https://wiki.example.com/runbooks/high-latency"
+          
+          # LATENCY: Very high P99 latency (critical)
+          - alert: CriticalLatencyP99
+            expr: |
+              histogram_quantile(0.99, 
+                sum(rate(http_request_duration_seconds_bucket[5m])) by (job, le)
+              ) > 5.0
+            for: 2m
+            labels:
+              severity: critical
+              category: performance
+            annotations:
+              summary: "Critical P99 latency on {{ $labels.job }}"
+              description: "P99 latency is {{ $value | humanizeDuration }} (threshold: 5s)"
+          
+          # ERRORS: High error rate
+          - alert: HighErrorRate
+            expr: |
+              sum(rate(http_requests_total{status=~"5.."}[5m])) by (job) 
+              / sum(rate(http_requests_total[5m])) by (job) 
+              > 0.05
+            for: 5m
+            labels:
+              severity: warning
+              category: reliability
+            annotations:
+              summary: "High error rate on {{ $labels.job }}"
+              description: "Error rate is {{ $value | humanizePercentage }} (threshold: 5%)"
+          
+          # ERRORS: Critical error rate
+          - alert: CriticalErrorRate
+            expr: |
+              sum(rate(http_requests_total{status=~"5.."}[5m])) by (job) 
+              / sum(rate(http_requests_total[5m])) by (job) 
+              > 0.20
+            for: 2m
+            labels:
+              severity: critical
+              category: reliability
+            annotations:
+              summary: "Critical error rate on {{ $labels.job }}"
+              description: "Error rate is {{ $value | humanizePercentage }} (threshold: 20%)"
+          
+          # TRAFFIC: Unusual traffic drop (possible outage indicator)
+          - alert: TrafficDrop
+            expr: |
+              sum(rate(http_requests_total[5m])) by (job) 
+              < sum(rate(http_requests_total[1h] offset 1d)) by (job) * 0.3
+            for: 10m
+            labels:
+              severity: warning
+              category: traffic
+            annotations:
+              summary: "Significant traffic drop on {{ $labels.job }}"
+              description: "Traffic is 70% below same time yesterday"
+          
+          # SATURATION: High CPU usage
+          - alert: HighCPUUsage
+            expr: |
+              sum(rate(process_cpu_seconds_total[5m])) by (job) > 0.8
+            for: 10m
+            labels:
+              severity: warning
+              category: saturation
+            annotations:
+              summary: "High CPU usage on {{ $labels.job }}"
+              description: "CPU usage is {{ $value | humanizePercentage }}"
+          
+          # SERVICE DOWN: No successful requests
+          - alert: ServiceDown
+            expr: |
+              up{job=~"api-gateway|model-catalog-service|upload-download-service|collaboration-service"} == 0
+            for: 1m
+            labels:
+              severity: critical
+              category: availability
+            annotations:
+              summary: "Service {{ $labels.job }} is down"
+              description: "No successful scrapes for 1 minute"
+      
+      # ===========================================
+      # Database Alerts
+      # ===========================================
+      - name: database-alerts
+        rules:
+          # PostgreSQL: Replication lag
+          - alert: PostgresReplicationLag
+            expr: |
+              pg_replication_lag_seconds > 30
+            for: 5m
+            labels:
+              severity: warning
+              category: database
+            annotations:
+              summary: "PostgreSQL replication lag on {{ $labels.instance }}"
+              description: "Replication lag is {{ $value | humanizeDuration }}"
+          
+          # PostgreSQL: Connection pool exhaustion
+          - alert: PostgresConnectionPoolHigh
+            expr: |
+              (pg_stat_activity_count / pg_settings_max_connections) > 0.8
+            for: 5m
+            labels:
+              severity: warning
+              category: database
+            annotations:
+              summary: "PostgreSQL connection pool near exhaustion"
+              description: "{{ $value | humanizePercentage }} of connections used"
+          
+          # MongoDB: Replica set member down
+          - alert: MongoDBReplicaSetMemberDown
+            expr: |
+              mongodb_rs_members_health == 0
+            for: 1m
+            labels:
+              severity: critical
+              category: database
+            annotations:
+              summary: "MongoDB replica set member {{ $labels.member }} is unhealthy"
+              description: "Member is not reachable or experiencing issues"
+          
+          # Redis: High memory usage
+          - alert: RedisHighMemory
+            expr: |
+              redis_memory_used_bytes / redis_memory_max_bytes > 0.85
+            for: 5m
+            labels:
+              severity: warning
+              category: database
+            annotations:
+              summary: "Redis high memory usage on {{ $labels.instance }}"
+              description: "Memory usage is {{ $value | humanizePercentage }}"
+          
+          # Redis: Master failover
+          - alert: RedisMasterFailover
+            expr: |
+              changes(redis_sentinel_master_address[5m]) > 0
+            labels:
+              severity: warning
+              category: database
+            annotations:
+              summary: "Redis master failover detected"
+              description: "Sentinel elected a new master"
+      
+      # ===========================================
+      # Message Queue Alerts
+      # ===========================================
+      - name: rabbitmq-alerts
+        rules:
+          # RabbitMQ: Queue depth too high
+          - alert: RabbitMQHighQueueDepth
+            expr: |
+              rabbitmq_queue_messages > 10000
+            for: 10m
+            labels:
+              severity: warning
+              category: messaging
+            annotations:
+              summary: "RabbitMQ queue {{ $labels.queue }} has high depth"
+              description: "Queue depth is {{ $value }} messages"
+          
+          # RabbitMQ: Consumers down
+          - alert: RabbitMQNoConsumers
+            expr: |
+              rabbitmq_queue_consumers == 0 and rabbitmq_queue_messages > 0
+            for: 5m
+            labels:
+              severity: critical
+              category: messaging
+            annotations:
+              summary: "RabbitMQ queue {{ $labels.queue }} has no consumers"
+              description: "Messages are piling up with no consumers"
+          
+          # RabbitMQ: Node memory alarm
+          - alert: RabbitMQMemoryAlarm
+            expr: |
+              rabbitmq_node_mem_alarm == 1
+            for: 1m
+            labels:
+              severity: critical
+              category: messaging
+            annotations:
+              summary: "RabbitMQ memory alarm on {{ $labels.node }}"
+              description: "Node is blocking publishers due to memory pressure"
+      
+      # ===========================================
+      # Object Storage Alerts (MinIO)
+      # ===========================================
+      - name: minio-alerts
+        rules:
+          # MinIO: Disk space low
+          - alert: MinIODiskSpaceLow
+            expr: |
+              minio_cluster_disk_free_bytes / minio_cluster_disk_total_bytes < 0.15
+            for: 10m
+            labels:
+              severity: warning
+              category: storage
+            annotations:
+              summary: "MinIO disk space low"
+              description: "Only {{ $value | humanizePercentage }} disk space remaining"
+          
+          # MinIO: Offline drives
+          - alert: MinIOOfflineDrives
+            expr: |
+              minio_cluster_disk_offline_total > 0
+            for: 5m
+            labels:
+              severity: critical
+              category: storage
+            annotations:
+              summary: "MinIO has offline drives"
+              description: "{{ $value }} drives are offline"
+      
+      # ===========================================
+      # Kubernetes Infrastructure Alerts
+      # ===========================================
+      - name: kubernetes-alerts
+        rules:
+          # Pod crash looping
+          - alert: PodCrashLooping
+            expr: |
+              increase(kube_pod_container_status_restarts_total[1h]) > 5
+            labels:
+              severity: warning
+              category: infrastructure
+            annotations:
+              summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} is crash looping"
+              description: "{{ $value }} restarts in the last hour"
+          
+          # HPA at max replicas
+          - alert: HPAAtMaxReplicas
+            expr: |
+              kube_horizontalpodautoscaler_status_current_replicas == kube_horizontalpodautoscaler_spec_max_replicas
+            for: 15m
+            labels:
+              severity: warning
+              category: infrastructure
+            annotations:
+              summary: "HPA {{ $labels.horizontalpodautoscaler }} at max replicas"
+              description: "Consider increasing max replicas or optimizing the service"
+          
+          # PVC nearly full
+          - alert: PVCNearlyFull
+            expr: |
+              kubelet_volume_stats_used_bytes / kubelet_volume_stats_capacity_bytes > 0.85
+            for: 10m
+            labels:
+              severity: warning
+              category: infrastructure
+            annotations:
+              summary: "PVC {{ $labels.persistentvolumeclaim }} is nearly full"
+              description: "{{ $value | humanizePercentage }} used"
+

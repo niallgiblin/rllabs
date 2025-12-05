@@ -19,12 +19,34 @@ spec:
           ports:
             - containerPort: 8000
           env:
+            # Observability Configuration
+            - name: OTEL_SERVICE_NAME
+              value: "model-catalog-service"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://jaeger:4317"
+            - name: TRACING_ENABLED
+              value: "true"
+            - name: LOG_LEVEL
+              value: "INFO"
+            # PostgreSQL Configuration (HA-aware)
+            # Primary for writes
             - name: DATABASE_URL
-              value: "postgresql://rllabs:rllabs_password@postgres/model_catalog_db"
+              value: "postgresql://rllabs:rllabs_password@postgres-primary/model_catalog_db"
+            # Read replicas for read scaling (comma-separated)
+            # Falls back to primary if not set (backward compatible)
+            - name: DATABASE_REPLICA_URLS
+              value: "postgresql://rllabs:rllabs_password@postgres-replica/model_catalog_db"
             - name: REDIS_HOST
               value: "redis"
             - name: REDIS_PORT
               value: "6379"
+            - name: REDIS_PASSWORD
+              value: "redis_password"
+            # Redis Sentinel Configuration (for automatic failover)
+            - name: REDIS_SENTINEL_HOSTS
+              value: "redis-sentinel-0.redis-sentinel:26379,redis-sentinel-1.redis-sentinel:26379,redis-sentinel-2.redis-sentinel:26379"
+            - name: REDIS_SENTINEL_MASTER_NAME
+              value: "mymaster"
             - name: RABBITMQ_HOST
               value: "rabbitmq"
             - name: RABBITMQ_PORT
@@ -35,11 +57,25 @@ spec:
               value: "admin_password"
           resources:
             requests:
-              cpu: "100m"
-              memory: "128Mi"
+              cpu: "500m"          # Increased from 200m to prevent CPU saturation
+              memory: "256Mi"      # Increased from 160Mi
             limits:
-              cpu: "200m"
-              memory: "256Mi"
+              cpu: "2000m"         # Increased from 1000m (2 cores) to handle serialization/ORM overhead
+              memory: "512Mi"      # Increased from 320Mi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 3
 ---
 apiVersion: v1
 kind: Service

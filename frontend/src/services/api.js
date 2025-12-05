@@ -126,9 +126,20 @@ export async function apiRequest(endpoint, options = {}) {
 
 // Models API
 export const models = {
-  async list() {
-    const result = await apiRequest('/api/models')
-    return result || [] // Return empty array if API unavailable
+  async list(page = 1, pageSize = 50) {
+    const response = await apiRequest(`/api/models?page=${page}&page_size=${pageSize}`)
+    // Handle both old format (array) and new format (paginated) for backward compatibility
+    if (Array.isArray(response)) {
+      return {
+        items: response,
+        total: response.length,
+        page: 1,
+        page_size: response.length,
+        total_pages: 1
+      }
+    }
+    // New paginated format
+    return response
   },
   
   async get(id) {

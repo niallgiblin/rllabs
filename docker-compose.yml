@@ -81,8 +81,6 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
-      db-init:
-        condition: service_completed_successfully
     networks:
       - rllabs-network
     volumes:
@@ -112,7 +110,7 @@ services:
     volumes:
       - ./model_train_service:/app
 
-  # PostgreSQL Database for Model Catalog Service (Metadata)
+  # PostgreSQL Database for Model Catalog Service (Metadata) and Upload/Download
   postgres:
     image: postgres:13
     container_name: postgres_db
@@ -120,10 +118,16 @@ services:
       POSTGRES_USER: rllabs
       POSTGRES_PASSWORD: rllabs_password
       POSTGRES_DB: model_catalog_db
+      POSTGRES_MULTIPLE_DATABASES: upload_download_db
+      # CRITICAL: Increase max_connections to handle connection pools from multiple services
+      # With connection pools of 40 per pod, we need at least 300 connections
+      # to account for multiple pods, read replicas, and system overhead
+      POSTGRES_MAX_CONNECTIONS: "300"
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./postgres-init/create-multiple-databases.sh:/docker-entrypoint-initdb.d/create-multiple-databases.sh
     networks:
       - rllabs-network
     healthcheck:
@@ -132,23 +136,6 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-
-  # Initialize additional databases
-  db-init:
-    image: postgres:13
-    depends_on:
-      postgres:
-        condition: service_healthy
-    networks:
-      - rllabs-network
-    environment:
-      PGPASSWORD: rllabs_password
-    entrypoint: >
-      /bin/sh -c "
-      psql -h postgres -U rllabs -d postgres -tc \"SELECT 1 FROM pg_database WHERE datname = 'upload_download_db'\" | grep -q 1 || psql -h postgres -U rllabs -d postgres -c \"CREATE DATABASE upload_download_db;\";
-      echo 'Database initialization complete';
-      exit 0;
-      "
 
   # Redis for Caching and Rate Limiting
   redis:

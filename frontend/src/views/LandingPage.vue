@@ -408,11 +408,14 @@ const selectedFilter = ref('all')
 const sortBy = ref('newest')
 
 // Fetch models from API
-const fetchModels = async () => {
+const fetchModels = async (page = 1, pageSize = 50) => {
   try {
     loading.value = true
     error.value = null
-    const data = await modelsApi.list()
+    const response = await modelsApi.list(page, pageSize)
+    
+    // Handle paginated response - extract items array
+    const data = response.items || response // Support both paginated and legacy format
     
     // Handle case where API is unavailable (dev mode graceful failure)
     if (!data || !Array.isArray(data)) {

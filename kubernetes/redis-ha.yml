@@ -1,0 +1,293 @@
+# Redis High Availability Configuration
+# Master + 2 Replicas + 3 Sentinels for automatic failover
+# Demonstrates: Master-replica replication, automatic failover, Sentinel consensus
+
+---
+# Redis Master StatefulSet
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis-master
+spec:
+  serviceName: redis-master
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+      role: master
+  template:
+    metadata:
+      labels:
+        app: redis
+        role: master
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          command:
+            - redis-server
+            - --requirepass
+            - "redis_password"
+            - --masterauth
+            - "redis_password"
+            - --appendonly
+            - "yes"
+            - --maxmemory
+            - "100mb"
+            - --maxmemory-policy
+            - "allkeys-lru"
+            - --maxclients
+            - "10000"
+          ports:
+            - containerPort: 6379
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"
+          readinessProbe:
+            exec:
+              command:
+                - redis-cli
+                - -a
+                - redis_password
+                - ping
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command:
+                - redis-cli
+                - -a
+                - redis_password
+                - ping
+            initialDelaySeconds: 15
+            periodSeconds: 10
+
+---
+# Redis Replica StatefulSet
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis-replica
+spec:
+  serviceName: redis-replica
+  replicas: 2
+  selector:
+    matchLabels:
+      app: redis
+      role: replica
+  template:
+    metadata:
+      labels:
+        app: redis
+        role: replica
+    spec:
+      initContainers:
+        - name: wait-for-master
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              echo "Waiting for redis-master to be resolvable..."
+              until nslookup redis-master.default.svc.cluster.local; do
+                echo "Waiting for DNS..."
+                sleep 2
+              done
+              echo "redis-master is resolvable!"
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          command:
+            - redis-server
+            - --replicaof
+            - redis-master.default.svc.cluster.local
+            - "6379"
+            - --requirepass
+            - "redis_password"
+            - --masterauth
+            - "redis_password"
+            - --appendonly
+            - "yes"
+            - --maxmemory
+            - "50mb"
+            - --maxmemory-policy
+            - "allkeys-lru"
+            - --maxclients
+            - "10000"
+          ports:
+            - containerPort: 6379
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "128Mi"
+          readinessProbe:
+            exec:
+              command:
+                - redis-cli
+                - -a
+                - redis_password
+                - ping
+            initialDelaySeconds: 5
+            periodSeconds: 5
+
+---
+# Redis Sentinel StatefulSet (for automatic failover)
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis-sentinel
+spec:
+  serviceName: redis-sentinel
+  replicas: 3
+  selector:
+    matchLabels:
+      app: redis-sentinel
+  template:
+    metadata:
+      labels:
+        app: redis-sentinel
+    spec:
+      initContainers:
+        - name: wait-for-master
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              echo "Waiting for redis-master to be resolvable and ready..."
+              until nslookup redis-master.default.svc.cluster.local; do
+                echo "Waiting for DNS..."
+                sleep 2
+              done
+              # Wait for master to actually be responding
+              sleep 10
+              echo "redis-master should be ready now!"
+        - name: init-sentinel
+          image: redis:7-alpine
+          command:
+            - sh
+            - -c
+            - |
+              # Get the master IP for sentinel config
+              MASTER_IP=$(getent hosts redis-master.default.svc.cluster.local | awk '{ print $1 }' | head -1)
+              echo "Master IP: $MASTER_IP"
+              
+              cat > /data/sentinel.conf << EOF
+              port 26379
+              sentinel monitor mymaster ${MASTER_IP:-redis-master.default.svc.cluster.local} 6379 2
+              sentinel auth-pass mymaster redis_password
+              sentinel down-after-milliseconds mymaster 5000
+              sentinel failover-timeout mymaster 60000
+              sentinel parallel-syncs mymaster 1
+              sentinel resolve-hostnames yes
+              sentinel announce-hostnames yes
+              EOF
+              
+              cat /data/sentinel.conf
+          volumeMounts:
+            - name: sentinel-config
+              mountPath: /data
+      containers:
+        - name: sentinel
+          image: redis:7-alpine
+          command:
+            - redis-sentinel
+            - /data/sentinel.conf
+          ports:
+            - containerPort: 26379
+          volumeMounts:
+            - name: sentinel-config
+              mountPath: /data
+          resources:
+            requests:
+              cpu: "50m"  # INCREASED from 25m to meet cluster minimum requirements
+              memory: "64Mi"  # INCREASED from 32Mi to meet cluster minimum requirements
+            limits:
+              cpu: "100m"
+              memory: "64Mi"
+          readinessProbe:
+            exec:
+              command:
+                - redis-cli
+                - -p
+                - "26379"
+                - ping
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            exec:
+              command:
+                - redis-cli
+                - -p
+                - "26379"
+                - ping
+            initialDelaySeconds: 20
+            periodSeconds: 10
+      volumes:
+        - name: sentinel-config
+          emptyDir: {}
+
+---
+# Redis Master Service (headless for StatefulSet)
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-master
+spec:
+  clusterIP: None
+  selector:
+    app: redis
+    role: master
+  ports:
+    - port: 6379
+      targetPort: 6379
+
+---
+# Redis Replica Service (for read scaling)
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-replica
+spec:
+  selector:
+    app: redis
+    role: replica
+  ports:
+    - port: 6379
+      targetPort: 6379
+
+---
+# Redis Sentinel Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-sentinel
+spec:
+  clusterIP: None
+  selector:
+    app: redis-sentinel
+  ports:
+    - port: 26379
+      targetPort: 26379
+
+---
+# Redis Service (alias for backward compatibility)
+# Points to redis-master for services that connect to "redis" service name
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+spec:
+  selector:
+    app: redis
+    role: master
+  ports:
+    - port: 6379
+      targetPort: 6379

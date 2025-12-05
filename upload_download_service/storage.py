@@ -21,6 +21,7 @@ from botocore.exceptions import ClientError
 from botocore.config import Config
 from typing import Dict, List, Optional
 import logging
+import asyncio
 from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
@@ -63,7 +64,18 @@ class StorageService:
         self.use_ssl = use_ssl
         
         # aioboto3 session for async operations
+        # Configure connection pooling and retries for better performance
+        config = Config(
+            max_pool_connections=50,  # Max connections in connection pool
+            retries={
+                'max_attempts': 3,  # Retry failed requests
+                'mode': 'adaptive'  # Adaptive retry mode
+            },
+            connect_timeout=10,  # Connection timeout
+            read_timeout=30  # Read timeout for operations
+        )
         self.session = aioboto3.Session()
+        self.config = config
     
     async def initialize(self):
         """
@@ -77,6 +89,7 @@ class StorageService:
             endpoint_url=f"{'https' if self.use_ssl else 'http'}://{self.endpoint}",
             aws_access_key_id=self.access_key,
             aws_secret_access_key=self.secret_key,
+            config=self.config,
         ) as s3_client:
             try:
                 # Check if bucket exists
@@ -109,7 +122,12 @@ class StorageService:
         Note: Uses internal endpoint since this is server-to-server communication
         """
         # Use internal endpoint for server operations (not presigned URLs)
+        # Merge connection pooling config with signature config
         config = Config(
+            max_pool_connections=self.config.max_pool_connections,
+            retries=self.config.retries,
+            connect_timeout=self.config.connect_timeout,
+            read_timeout=self.config.read_timeout,
             signature_version='s3v4',
             s3={
                 'addressing_style': 'path'
@@ -166,7 +184,12 @@ class StorageService:
         presigned_endpoint = self.public_endpoint
         
         # Configure boto3 to use path-style addressing and ensure signature compatibility
+        # Merge connection pooling config with signature config
         config = Config(
+            max_pool_connections=self.config.max_pool_connections,
+            retries=self.config.retries,
+            connect_timeout=self.config.connect_timeout,
+            read_timeout=self.config.read_timeout,
             signature_version='s3v4',
             s3={
                 'addressing_style': 'path'
@@ -222,6 +245,7 @@ class StorageService:
             endpoint_url=f"{'https' if self.use_ssl else 'http'}://{self.endpoint}",
             aws_access_key_id=self.access_key,
             aws_secret_access_key=self.secret_key,
+            config=self.config,
         ) as s3_client:
             try:
                 response = await s3_client.complete_multipart_upload(
@@ -237,7 +261,7 @@ class StorageService:
                 logger.error(f"Failed to complete multipart upload: {e}")
                 raise Exception(f"Storage error: {str(e)}")
     
-    async def abort_multipart_upload(self, object_key: str, upload_id: str):
+    async def abort_multipart_upload(self, object_key: str, upload_id: str, timeout: float = 5.0):
         """
         Cancel a multipart upload and clean up partial data
         
@@ -246,21 +270,30 @@ class StorageService:
         Args:
             object_key: S3 key for the object
             upload_id: MinIO's multipart upload ID
+            timeout: Maximum time to wait for MinIO operation (default: 5 seconds)
         """
         async with self.session.client(
             's3',
             endpoint_url=f"{'https' if self.use_ssl else 'http'}://{self.endpoint}",
             aws_access_key_id=self.access_key,
             aws_secret_access_key=self.secret_key,
+            config=self.config,
         ) as s3_client:
             try:
-                await s3_client.abort_multipart_upload(
-                    Bucket=self.bucket,
-                    Key=object_key,
-                    UploadId=upload_id
+                # Add timeout: fail fast if MinIO is slow (prevents 7-13s blocking)
+                await asyncio.wait_for(
+                    s3_client.abort_multipart_upload(
+                        Bucket=self.bucket,
+                        Key=object_key,
+                        UploadId=upload_id
+                    ),
+                    timeout=timeout
                 )
                 logger.info(f"Aborted multipart upload: {object_key}")
                 
+            except asyncio.TimeoutError:
+                logger.warning(f"MinIO abort timeout ({timeout}s) for {object_key} - cleanup may be incomplete")
+                # Don't raise - best effort cleanup, timeout is acceptable
             except ClientError as e:
                 logger.warning(f"Failed to abort multipart upload: {e}")
                 # Don't raise - best effort cleanup
@@ -281,6 +314,7 @@ class StorageService:
             endpoint_url=f"{'https' if self.use_ssl else 'http'}://{self.endpoint}",
             aws_access_key_id=self.access_key,
             aws_secret_access_key=self.secret_key,
+            config=self.config,
         ) as s3_client:
             try:
                 await s3_client.copy_object(
@@ -308,6 +342,7 @@ class StorageService:
             endpoint_url=f"{'https' if self.use_ssl else 'http'}://{self.endpoint}",
             aws_access_key_id=self.access_key,
             aws_secret_access_key=self.secret_key,
+            config=self.config,
         ) as s3_client:
             try:
                 await s3_client.delete_object(
@@ -337,6 +372,7 @@ class StorageService:
             endpoint_url=f"{'https' if self.use_ssl else 'http'}://{self.endpoint}",
             aws_access_key_id=self.access_key,
             aws_secret_access_key=self.secret_key,
+            config=self.config,
         ) as s3_client:
             try:
                 response = await s3_client.head_object(
@@ -377,7 +413,12 @@ class StorageService:
         presigned_endpoint = self.public_endpoint
         
         # Configure boto3 to use path-style addressing and ensure signature compatibility
+        # Merge connection pooling config with signature config
         config = Config(
+            max_pool_connections=self.config.max_pool_connections,
+            retries=self.config.retries,
+            connect_timeout=self.config.connect_timeout,
+            read_timeout=self.config.read_timeout,
             signature_version='s3v4',
             s3={
                 'addressing_style': 'path'
