@@ -134,7 +134,7 @@ class ModelVersion(Base):
     __tablename__ = "model_versions"
 
     id = Column(Integer, primary_key=True, index=True)
-    model_id = Column(Integer, ForeignKey("models.id"), nullable=False)
+    model_id = Column(Integer, ForeignKey("models.id", ondelete="CASCADE"), nullable=False)
     version = Column(Integer, nullable=False)
     storage_path = Column(String, nullable=False)
     content_hash = Column(String, nullable=False) # SHA-256 of the model file

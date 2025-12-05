@@ -39,6 +39,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from datetime import datetime
 from bson import ObjectId
+from bson.errors import InvalidId
 import json
 import threading
 
@@ -332,25 +333,34 @@ def get_comments(model_id: str, page: int = 1, limit: int = 50):
 
 
 
+
+
+
+
+
 @app.get("/comments/{comment_id}")
 def get_comment(comment_id: str):
     """
-    Get specific comment
+    Get a specific comment by ID
     """
     try:
-        doc = comments_collection.find_one({"_id": ObjectId(comment_id)})
-    except:
-        raise HTTPException(status_code=400, detail="Invalid comment ID")
-    
-    if not doc:
-        raise HTTPException(status_code=404, detail="Comment not found")
-    
-    # Get creator for badge
-    creator_id = get_model_creator(doc["modelId"])
-    
-    return doc_to_response(doc, creator_id)
-
-
+        # Validate ObjectId format first - this will raise InvalidId if format is wrong
+        try:
+            object_id = ObjectId(comment_id)
+        except InvalidId:
+            raise HTTPException(status_code=400, detail="Invalid comment ID format")
+        
+        comment = comments_collection.find_one({"_id": object_id})
+        if not comment:
+            raise HTTPException(status_code=404, detail="Comment not found")
+        
+        # Get creator for badge
+        creator_id = get_model_creator(comment["modelId"])
+        return doc_to_response(comment, creator_id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
 
 @app.put("/comments/{comment_id}")
@@ -360,13 +370,19 @@ def update_comment(comment_id: str, update: CommentUpdate):
     """
     
     try:
+        # Validate ObjectId format first - this will raise InvalidId if format is wrong
+        try:
+            object_id = ObjectId(comment_id)
+        except InvalidId:
+            raise HTTPException(status_code=400, detail="Invalid comment ID format")
+        
         # Get comment first to know which model cache to invalidate
-        comment = comments_collection.find_one({"_id": ObjectId(comment_id)})
+        comment = comments_collection.find_one({"_id": object_id})
         if not comment:
             raise HTTPException(status_code=404, detail="Comment not found")
         
         result = comments_collection.update_one(
-            {"_id": ObjectId(comment_id)},
+            {"_id": object_id},
             {
                 "$set": {
                     "content": update.content,
@@ -391,8 +407,8 @@ def update_comment(comment_id: str, update: CommentUpdate):
         
     except HTTPException:
         raise
-    except:
-        raise HTTPException(status_code=400, detail="Invalid comment ID")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
     
     return {"message": "Comment updated"}
 
@@ -407,8 +423,14 @@ def delete_comment(comment_id: str):
     """
     
     try:
+        # Validate ObjectId format first - this will raise InvalidId if format is wrong
+        try:
+            object_id = ObjectId(comment_id)
+        except InvalidId:
+            raise HTTPException(status_code=400, detail="Invalid comment ID format")
+        
         # Find comment to check if it exists
-        comment = comments_collection.find_one({"_id": ObjectId(comment_id)})
+        comment = comments_collection.find_one({"_id": object_id})
         if not comment:
             raise HTTPException(status_code=404, detail="Comment not found")
         
@@ -434,7 +456,7 @@ def delete_comment(comment_id: str):
         all_descendants = get_all_descendants(comment_id)
         
         # Delete the original comment
-        comments_collection.delete_one({"_id": ObjectId(comment_id)})
+        comments_collection.delete_one({"_id": object_id})
         
         # Delete all descendants
         if all_descendants:
@@ -457,8 +479,8 @@ def delete_comment(comment_id: str):
         
     except HTTPException:
         raise
-    except:
-        raise HTTPException(status_code=400, detail="Invalid comment ID")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
     
     return {"message": "Comment deleted"}
 

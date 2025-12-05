@@ -14,12 +14,35 @@ export function useFileUpload() {
   const uploading = ref(false)
   const uploadProgress = ref(0)
   const uploadError = ref(null)
+  const currentUploadId = ref(null)
+  const abortController = ref(null)
+
+  const abortUpload = async () => {
+    if (currentUploadId.value) {
+      try {
+        await uploadsApi.abortUpload(currentUploadId.value)
+      } catch (error) {
+        console.error('Failed to abort upload:', error)
+      }
+    }
+    
+    if (abortController.value) {
+      abortController.value.abort()
+      abortController.value = null
+    }
+    
+    uploading.value = false
+    uploadProgress.value = 0
+    currentUploadId.value = null
+    uploadError.value = 'Upload cancelled'
+  }
 
   const uploadFile = async (file, modelName, modelDescription, modelId = null) => {
     try {
       uploading.value = true
       uploadProgress.value = 0
       uploadError.value = null
+      abortController.value = new AbortController()
 
       // Step 1: Calculate file hash
       uploadProgress.value = 5
@@ -47,6 +70,8 @@ export function useFileUpload() {
         model_id: modelId
       })
 
+      currentUploadId.value = uploadInit.upload_id
+
       // Step 4: Upload chunks to presigned URLs
       // presigned_urls is an array of { part_number, url, expires_at }
       const totalChunks = uploadInit.presigned_urls.length
@@ -56,6 +81,11 @@ export function useFileUpload() {
       const sortedUrls = [...uploadInit.presigned_urls].sort((a, b) => a.part_number - b.part_number)
 
       for (let i = 0; i < totalChunks; i++) {
+        // Check if upload was aborted
+        if (abortController.value?.signal.aborted) {
+          throw new Error('Upload cancelled')
+        }
+
         const presignedUrlData = sortedUrls[i]
         const partNumber = presignedUrlData.part_number
         const presignedUrl = presignedUrlData.url
@@ -73,7 +103,8 @@ export function useFileUpload() {
           body: chunk,
           headers: {
             'Content-Type': 'application/octet-stream'
-          }
+          },
+          signal: abortController.value?.signal
         })
 
         if (!response.ok) {
@@ -96,11 +127,19 @@ export function useFileUpload() {
         uploadProgress.value = 20 + (70 * (i + 1) / totalChunks)
       }
 
+      // Check if upload was aborted before completing
+      if (abortController.value?.signal.aborted) {
+        throw new Error('Upload cancelled')
+      }
+
       // Step 5: Complete upload
       uploadProgress.value = 90
       const result = await uploadsApi.completeUpload(uploadInit.upload_id, uploadedParts)
       
       uploadProgress.value = 100
+      currentUploadId.value = null
+      abortController.value = null
+      
       return {
         success: true,
         modelId: result.model_id,
@@ -110,6 +149,18 @@ export function useFileUpload() {
     } catch (error) {
       console.error('Upload error:', error)
       uploadError.value = error.message || 'Upload failed'
+      
+      // Abort the upload on the backend if we have an upload ID
+      if (currentUploadId.value && !abortController.value?.signal.aborted) {
+        try {
+          await uploadsApi.abortUpload(currentUploadId.value)
+        } catch (abortError) {
+          console.error('Failed to abort upload on backend:', abortError)
+        }
+      }
+      
+      currentUploadId.value = null
+      abortController.value = null
       throw error
     } finally {
       uploading.value = false
@@ -120,7 +171,8 @@ export function useFileUpload() {
     uploading,
     uploadProgress,
     uploadError,
-    uploadFile
+    uploadFile,
+    abortUpload
   }
 }
 

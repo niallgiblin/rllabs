@@ -1,16 +1,15 @@
 import { ref, computed } from 'vue'
-import { auth } from '../services/api'
+import { auth, authApi } from '../services/api'
 
 // Global auth state
 const isAuthenticated = ref(auth.isAuthenticated())
 const currentUser = ref(null)
 
 export function useAuth() {
-  const login = (token) => {
+  const login = async (token) => {
     auth.setToken(token)
     isAuthenticated.value = true
-    // In a real app, you might decode the JWT to get user info
-    // For now, we'll just track that they're logged in
+    await fetchCurrentUser()
   }
   
   const logout = () => {
@@ -18,12 +17,29 @@ export function useAuth() {
     isAuthenticated.value = false
     currentUser.value = null
   }
+
+  const fetchCurrentUser = async () => {
+    if (auth.isAuthenticated()) {
+      try {
+        const user = await authApi.getCurrentUser()
+        currentUser.value = user
+      } catch (error) {
+        console.error("Failed to fetch current user:", error)
+        logout() // Log out if token is invalid
+      }
+    }
+  }
   
   return {
     isAuthenticated: computed(() => isAuthenticated.value),
     currentUser: computed(() => currentUser.value),
     login,
-    logout
+    logout,
+    fetchCurrentUser
   }
 }
+
+// Initial fetch of current user if a token exists
+const { fetchCurrentUser } = useAuth()
+fetchCurrentUser()
 
