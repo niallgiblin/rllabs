@@ -20,6 +20,19 @@ spec:
             - containerPort: 8002
           env:
             # MinIO Configuration
+            - name: MINIO_ENDPOINT
+              value: "minio:9000"
+            - name: MINIO_PUBLIC_ENDPOINT
+              value: "localhost:9000"  # For browser-accessible presigned URLs (via port-forward)
+            - name: MINIO_ACCESS_KEY
+              value: "minioadmin"
+            - name: MINIO_SECRET_KEY
+              value: "minioadmin_password"
+            - name: MINIO_BUCKET
+              value: "models"
+            - name: MINIO_USE_SSL
+              value: "false"
+            # Legacy S3_* variables (for backward compatibility if needed)
             - name: S3_ENDPOINT_URL
               value: "http://minio:9000"
             - name: S3_ACCESS_KEY

@@ -122,6 +122,45 @@ build_and_load "upload-download-service" "upload_download_service/Dockerfile"
 build_and_load "collaboration-service" "collaboration_service/dockerfile"
 build_and_load "model-train-service" "model_train_service/Dockerfile"
 
+# Build frontend with API gateway URL
+# Note: Frontend endpoints already include /api prefix, so base URL should be just the gateway URL
+# Using localhost:8080 for port-forward compatibility
+# If using ingress on the same domain, rebuild with: --build-arg VITE_API_BASE_URL=
+# For production, use: --build-arg VITE_API_BASE_URL=http://<api-domain>
+echo -n "  Building frontend... "
+BUILD_START=$(date +%s)
+if docker build \
+    --progress=plain \
+    --tag frontend:latest \
+    --file frontend/Dockerfile \
+    --build-arg VITE_API_BASE_URL=http://localhost:8080 \
+    --build-arg BUILDKIT_INLINE_CACHE=1 \
+    ./frontend > /tmp/frontend-build.log 2>&1
+then
+    BUILD_TIME=$(($(date +%s) - BUILD_START))
+    echo -e "${GREEN}✓${NC} (${BUILD_TIME}s)"
+    echo -n "    Loading into kind... "
+    LOAD_START=$(date +%s)
+    if kind load docker-image frontend:latest --name ${CLUSTER_NAME} >/dev/null 2>&1; then
+        LOAD_TIME=$(($(date +%s) - LOAD_START))
+        echo -e "${GREEN}✓${NC} (${LOAD_TIME}s)"
+    else
+        echo -e "${YELLOW}(may already be loaded)${NC}"
+    fi
+else
+    BUILD_TIME=$(($(date +%s) - BUILD_START))
+    echo -e "${RED}✗${NC} (failed after ${BUILD_TIME}s)"
+    echo "    Build logs: /tmp/frontend-build.log"
+    echo "    Last 10 lines:"
+    tail -10 /tmp/frontend-build.log | sed 's/^/      /'
+    if docker images frontend:latest --format "{{.Repository}}" 2>/dev/null | grep -q "^frontend$"; then
+        echo "    Attempting to use existing image..."
+        if kind load docker-image frontend:latest --name ${CLUSTER_NAME} >/dev/null 2>&1; then
+            echo "    ${GREEN}✓ Using existing image${NC}"
+        fi
+    fi
+fi
+
 echo "  Images built and loaded"
 echo ""
 
@@ -252,9 +291,10 @@ kubectl apply -f kubernetes/upload-download-service.yml 2>/dev/null || true
 kubectl apply -f kubernetes/collaboration-service.yml 2>/dev/null || true
 kubectl apply -f kubernetes/model-train-service.yml 2>/dev/null || true
 kubectl apply -f kubernetes/api-gateway.yml 2>/dev/null || true
+kubectl apply -f kubernetes/frontend.yml 2>/dev/null || true
 
 echo "  Restarting deployments to ensure fresh start..."
-for deployment in api-gateway model-catalog-service upload-download-service collaboration-service model-train-service; do
+for deployment in api-gateway model-catalog-service upload-download-service collaboration-service model-train-service frontend; do
     kubectl rollout restart deployment/$deployment 2>/dev/null || true
 done
 
@@ -266,6 +306,33 @@ kubectl scale deployment api-gateway --replicas=2 2>/dev/null || true
 echo "  Application manifests applied and restarted"
 echo "  Waiting 90 seconds for applications to start..."
 sleep 90
+
+echo ""
+
+# Step 4.5: Deploy Observability Stack
+echo -e "${BLUE}STEP 4.5: Deploying Observability Stack${NC}"
+echo "───────────────────────────────────────────────────────────────"
+
+echo "  Deploying observability services (Prometheus, Grafana, Jaeger, Loki, Alertmanager)..."
+kubectl apply -f kubernetes/prometheus-alerts.yml 2>/dev/null || true
+kubectl apply -f kubernetes/alertmanager.yml 2>/dev/null || true
+kubectl apply -f kubernetes/jaeger.yml 2>/dev/null || true
+kubectl apply -f kubernetes/loki.yml 2>/dev/null || true
+kubectl apply -f kubernetes/prometheus.yml 2>/dev/null || true
+
+# Create Grafana dashboard ConfigMap if it doesn't exist
+if [ -f "kubernetes/grafana-dashboard-rllabs.json" ]; then
+    echo "  Creating Grafana dashboard ConfigMap..."
+    kubectl create configmap grafana-dashboard-rllabs \
+        --from-file=kubernetes/grafana-dashboard-rllabs.json \
+        --dry-run=client -o yaml | kubectl apply -f - 2>/dev/null || true
+fi
+
+kubectl apply -f kubernetes/grafana.yml 2>/dev/null || true
+
+echo "  Observability manifests applied"
+echo "  Waiting 60 seconds for observability services to start..."
+sleep 60
 
 echo ""
 
@@ -321,7 +388,7 @@ if [ -f "./scripts/check_system_health.sh" ]; then
     set -e
 else
     echo "  Running quick status check..."
-    kubectl get pods -l 'app in (api-gateway,model-catalog-service,upload-download-service,collaboration-service,model-train-service)' --no-headers 2>/dev/null | head -10
+    kubectl get pods -l 'app in (api-gateway,model-catalog-service,upload-download-service,collaboration-service,model-train-service,frontend)' --no-headers 2>/dev/null | head -10
     HEALTH_EXIT=0
 fi
 
@@ -334,12 +401,16 @@ if [ "$HEALTH_EXIT" -eq 0 ]; then
     echo "All services are running and ready. The system is ready for load testing."
     echo ""
 echo "Next steps:"
-echo "  1. Test the API: curl http://localhost:8080/health"
-echo "  2. Run load test: python tests/comprehensive_load_test.py --users 10 --duration 60"
-echo "  3. Check Grafana: http://localhost:3000"
+echo "  1. Access the Frontend: http://localhost:5173"
+echo "  2. Test the API: curl http://localhost:8080/health"
+echo "  3. Run load test: python tests/comprehensive_load_test.py --users 10 --duration 60"
+echo "  4. Check Grafana: http://localhost:3000"
 echo ""
-echo "Note: API Gateway port-forward is set up on port 8080"
-echo "      If port-forward fails, run: kubectl port-forward svc/api-gateway 8080:8080"
+echo "Note: Frontend port-forward is set up on port 5173"
+echo "      API Gateway port-forward is set up on port 8080"
+echo "      If port-forwards fail, run:"
+echo "        kubectl port-forward svc/frontend 5173:80"
+echo "        kubectl port-forward svc/api-gateway 8080:8080"
 else
     echo -e "${YELLOW}⚠️  SYSTEM STARTUP COMPLETE - SOME SERVICES NOT READY${NC}"
     echo ""
@@ -367,14 +438,38 @@ check_port() {
     fi
 }
 
+# Kill any dead or existing port-forwards for a service
+cleanup_port_forward() {
+    local service=$1
+    local port=$2
+    
+    # Kill any kubectl port-forward processes for this service/port
+    pkill -f "kubectl port-forward.*${service}.*${port}" 2>/dev/null || true
+    
+    # Also kill any process using the port (in case it's a dead port-forward)
+    local port_pid=$(lsof -ti:$port 2>/dev/null || true)
+    if [ -n "$port_pid" ]; then
+        # Check if it's actually a kubectl port-forward
+        if ps -p $port_pid -o command= 2>/dev/null | grep -q "kubectl port-forward.*${service}"; then
+            kill $port_pid 2>/dev/null || true
+            sleep 1
+        fi
+    fi
+}
 
 start_port_forward() {
     local service=$1
     local port=$2
     local name=$3
     
+    # Clean up any existing port-forwards first
+    cleanup_port_forward "$service" "$port"
+    
+    # Wait a moment for cleanup to complete
+    sleep 1
+    
     if check_port $port; then
-        echo -e "  ${YELLOW}⚠️  Port $port is already in use. Skipping $name...${NC}"
+        echo -e "  ${YELLOW}⚠️  Port $port is still in use. Skipping $name...${NC}"
         echo "     If you want to restart, kill the process first:"
         echo "     lsof -ti:$port | xargs kill"
         return 1
@@ -383,13 +478,20 @@ start_port_forward() {
     echo -n "  Starting port forward for $name on port $port... "
     kubectl port-forward svc/$service $port:$port > /tmp/${service}-port-forward.log 2>&1 &
     local pid=$!
-    sleep 2
+    sleep 3  # Give it time to establish connection
     if kill -0 $pid 2>/dev/null; then
-        echo -e "${GREEN}✓${NC} (PID: $pid)"
+        # Double-check the port is actually listening
+        if check_port $port; then
+            echo -e "${GREEN}✓${NC} (PID: $pid)"
+            return 0
+        else
+            echo -e "${YELLOW}⚠️  Process started but port not listening${NC}"
+            return 1
+        fi
     else
-        echo -e "${YELLOW}(may have failed, check logs)${NC}"
+        echo -e "${YELLOW}⚠️  Failed to start (check logs: /tmp/${service}-port-forward.log)${NC}"
+        return 1
     fi
-    return 0
 }
 
 echo "  Setting up port forwarding for observability services..."
@@ -426,22 +528,71 @@ else
 fi
 
 # Also set up port-forward for API Gateway (needed for load testing)
+echo ""
 if kubectl get svc api-gateway >/dev/null 2>&1; then
-    if check_port 8080; then
-        echo -e "  ${YELLOW}⚠️  Port 8080 is already in use. Skipping API Gateway port-forward...${NC}"
-        echo "     If you want to restart, kill the process first:"
-        echo "     lsof -ti:8080 | xargs kill"
+    # Use the same cleanup and start function for consistency
+    if start_port_forward "api-gateway" "8080" "API Gateway"; then
+        # Port-forward started successfully
+        :
     else
-        echo -n "  Starting port forward for API Gateway on port 8080... "
-        kubectl port-forward svc/api-gateway 8080:8080 > /tmp/api-gateway-port-forward.log 2>&1 &
-        API_GW_PID=$!
-        sleep 2
-        if kill -0 $API_GW_PID 2>/dev/null; then
-            echo -e "${GREEN}✓${NC} (PID: $API_GW_PID)"
+        echo -e "  ${YELLOW}⚠️  API Gateway port-forward failed or port is in use${NC}"
+        echo "     This is required for load testing. To fix:"
+        echo "     lsof -ti:8080 | xargs kill"
+        echo "     kubectl port-forward svc/api-gateway 8080:8080"
+    fi
+else
+    echo -e "  ${YELLOW}⚠️  API Gateway service not found. Skipping...${NC}"
+fi
+
+# Set up port-forward for Frontend (needs custom port mapping: local:service = 5173:80)
+echo ""
+if kubectl get svc frontend >/dev/null 2>&1; then
+    # Frontend service uses port 80, forward to local port 5173 to match docker-compose
+    cleanup_port_forward "frontend" "5173"
+    sleep 1
+    if check_port 5173; then
+        echo -e "  ${YELLOW}⚠️  Port 5173 is still in use. Skipping Frontend...${NC}"
+        echo "     To manually set up:"
+        echo "     lsof -ti:5173 | xargs kill"
+        echo "     kubectl port-forward svc/frontend 5173:80"
+    else
+        echo -n "  Starting port forward for Frontend on port 5173... "
+        kubectl port-forward svc/frontend 5173:80 > /tmp/frontend-port-forward.log 2>&1 &
+        FRONTEND_PID=$!
+        sleep 3
+        if kill -0 $FRONTEND_PID 2>/dev/null && check_port 5173; then
+            echo -e "${GREEN}✓${NC} (PID: $FRONTEND_PID)"
         else
-            echo -e "${YELLOW}(may have failed, check logs)${NC}"
+            echo -e "${YELLOW}⚠️  Failed to start (check logs: /tmp/frontend-port-forward.log)${NC}"
         fi
     fi
+else
+    echo -e "  ${YELLOW}⚠️  Frontend service not found. Skipping...${NC}"
+fi
+
+# Set up port-forward for MinIO (needed for file uploads via presigned URLs)
+echo ""
+if kubectl get svc minio >/dev/null 2>&1; then
+    cleanup_port_forward "minio" "9000"
+    sleep 1
+    if check_port 9000; then
+        echo -e "  ${YELLOW}⚠️  Port 9000 is still in use. Skipping MinIO...${NC}"
+        echo "     To manually set up:"
+        echo "     lsof -ti:9000 | xargs kill"
+        echo "     kubectl port-forward svc/minio 9000:9000"
+    else
+        echo -n "  Starting port forward for MinIO on port 9000... "
+        kubectl port-forward svc/minio 9000:9000 > /tmp/minio-port-forward.log 2>&1 &
+        MINIO_PID=$!
+        sleep 3
+        if kill -0 $MINIO_PID 2>/dev/null && check_port 9000; then
+            echo -e "${GREEN}✓${NC} (PID: $MINIO_PID)"
+        else
+            echo -e "${YELLOW}⚠️  Failed to start (check logs: /tmp/minio-port-forward.log)${NC}"
+        fi
+    fi
+else
+    echo -e "  ${YELLOW}⚠️  MinIO service not found. Skipping...${NC}"
 fi
 
 echo ""
@@ -451,6 +602,9 @@ echo "────────────────────────�
 echo ""
 echo "Access the following services:"
 echo ""
+echo "  🌐 Frontend:     http://localhost:5173"
+echo "  🔌 API Gateway:  http://localhost:8080"
+echo "  📦 MinIO:        http://localhost:9000 (for file uploads)"
 echo "  📊 Grafana:      http://localhost:3000 (admin/admin)"
 echo "  📈 Prometheus:   http://localhost:9090"
 echo "  🔍 Jaeger:       http://localhost:16686"
@@ -463,6 +617,9 @@ echo "To stop all port forwarding:"
 echo "  pkill -f 'kubectl port-forward'"
 echo ""
 echo "To stop individual services:"
+echo "  lsof -ti:5173 | xargs kill  # Frontend"
+echo "  lsof -ti:8080 | xargs kill  # API Gateway"
+echo "  lsof -ti:9000 | xargs kill  # MinIO"
 echo "  lsof -ti:3000 | xargs kill  # Grafana"
 echo "  lsof -ti:9090 | xargs kill  # Prometheus"
 echo "  lsof -ti:16686 | xargs kill # Jaeger"

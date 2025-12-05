@@ -18,6 +18,7 @@ resources:
   - collaboration-service.yml
   - model-train-service.yml
   - api-gateway.yml
+  - frontend.yml
   
   # Ingress
   - ingress.yml

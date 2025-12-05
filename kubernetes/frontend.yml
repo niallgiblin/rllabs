@@ -1,0 +1,62 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: frontend
+  template:
+    metadata:
+      labels:
+        app: frontend
+    spec:
+      containers:
+        - name: frontend
+          image: frontend
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 80
+          # Note: VITE_API_BASE_URL is a build-time variable set during image build
+          # The image is built with: --build-arg VITE_API_BASE_URL=http://localhost:8080
+          # Frontend endpoints already include /api prefix, so base URL should be just the gateway URL
+          # This works with port-forward setup. For ingress on the same domain, rebuild with:
+          # --build-arg VITE_API_BASE_URL= (empty string for relative paths)
+          # For production, rebuild with: --build-arg VITE_API_BASE_URL=http://<api-domain>
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 80
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 80
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "256Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+spec:
+  selector:
+    app: frontend
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80
+  type: LoadBalancer
