@@ -1,0 +1,71 @@
+# MinIO Tenant Configuration for MinIO Operator
+# Requires MinIO Operator to be installed first
+# Demonstrates: Operator pattern, tenant management, enterprise-grade object storage
+
+apiVersion: minio.min.io/v2
+kind: Tenant
+metadata:
+  name: minio
+  namespace: default
+spec:
+  image: minio/minio:latest
+  imagePullPolicy: IfNotPresent
+  
+  # 4 servers with 1 volume each = erasure coding enabled
+  pools:
+    - servers: 4
+      name: pool-0
+      volumesPerServer: 1
+      volumeClaimTemplate:
+        metadata:
+          name: data
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 2Gi
+      resources:
+        requests:
+          cpu: "100m"
+          memory: "256Mi"
+        limits:
+          cpu: "500m"
+          memory: "512Mi"
+  
+  # Mount path for volumes
+  mountPath: /export
+  
+  # Expose MinIO and Console
+  exposeServices:
+    minio: true
+    console: true
+  
+  # Configuration from secret
+  configuration:
+    name: minio-env-configuration
+  
+  # Request automatic certificate generation (disabled for local dev)
+  requestAutoCert: false
+  
+  # Prometheus metrics
+  prometheusOperator: false
+  
+  # Features
+  features:
+    bucketDNS: false
+
+---
+# Secret for MinIO configuration
+apiVersion: v1
+kind: Secret
+metadata:
+  name: minio-env-configuration
+type: Opaque
+stringData:
+  config.env: |
+    export MINIO_ROOT_USER="minioadmin"
+    export MINIO_ROOT_PASSWORD="minioadmin_password"
+    export MINIO_PROMETHEUS_AUTH_TYPE="public"
+    export MINIO_BROWSER="on"
+

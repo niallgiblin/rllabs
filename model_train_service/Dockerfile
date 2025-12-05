@@ -5,13 +5,20 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
+# Copy requirements first for better caching
+COPY model_train_service/requirements.txt .
+COPY shared/requirements.txt shared_requirements.txt
 
-RUN pip install --no-cache-dir -r requirements.txt
+# Install dependencies
+RUN pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir -r shared_requirements.txt || true
 
-COPY . .
+# Copy service code
+COPY model_train_service/ .
 
-# The training service is a RabbitMQ consumer, not a web server
-# It runs model_trainer.py which starts the consumer
+# Copy shared observability module
+COPY shared/ /app/shared/
+
+# The training service runs both FastAPI (for health checks) and RabbitMQ consumer
 CMD ["python", "main.py"]
 

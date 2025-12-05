@@ -1,0 +1,41 @@
+# Resource Quotas and Limit Ranges
+# Demonstrates resource management in distributed systems
+#
+# ResourceQuota: Limits total resources per namespace
+# LimitRange: Sets default requests/limits for pods
+
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: rllabs-quota
+spec:
+  hard:
+    requests.cpu: "15"      # INCREASED: Total CPU requests (from 10) - supports more pods
+    requests.memory: "30Gi"  # INCREASED: Total memory requests (from 20Gi) - supports more pods
+    limits.cpu: "30"         # INCREASED: Total CPU limits (from 20) - supports more pods
+    limits.memory: "60Gi"    # INCREASED: Total memory limits (from 40Gi) - supports more pods
+    persistentvolumeclaims: "10"  # Max PVCs
+    pods: "80"               # INCREASED: Max pods (from 50) - supports maxReplicas: 20+20+15+15+5 = 75 + overhead
+
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: rllabs-limits
+spec:
+  limits:
+    - default:          # Default limits for containers
+        cpu: "500m"
+        memory: "512Mi"
+      defaultRequest:   # Default requests for containers
+        cpu: "100m"
+        memory: "128Mi"
+      max:              # Maximum allowed
+        cpu: "2"
+        memory: "4Gi"
+      min:              # Minimum required
+        cpu: "50m"
+        memory: "64Mi"
+      type: Container
+

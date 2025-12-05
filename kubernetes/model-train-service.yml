@@ -1,0 +1,102 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: model-train-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: model-train-service
+  template:
+    metadata:
+      labels:
+        app: model-train-service
+    spec:
+      containers:
+        - name: model-train-service
+          image: model-train-service
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8003
+          env:
+            # Observability Configuration
+            - name: OTEL_SERVICE_NAME
+              value: "training-service"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://jaeger:4317"
+            - name: TRACING_ENABLED
+              value: "true"
+            - name: LOG_LEVEL
+              value: "INFO"
+            # Service Configuration
+            - name: PORT
+              value: "8003"
+            - name: HOST
+              value: "0.0.0.0"
+            # Upload/Download Service
+            - name: UPLOAD_DOWNLOAD_SERVICE_URL
+              value: "http://upload-download-service:8002"
+            # RabbitMQ Configuration
+            - name: RABBITMQ_HOST
+              value: "rabbitmq"
+            - name: RABBITMQ_PORT
+              value: "5672"
+            - name: RABBITMQ_USER
+              value: "admin"
+            - name: RABBITMQ_PASS
+              value: "admin_password"
+            - name: RABBITMQ_QUEUE
+              value: "training_jobs"
+            - name: MAX_RETRIES
+              value: "3"
+            # Training Configuration
+            - name: NUM_EPISODES
+              value: "50"
+            # Redis Configuration for Job Status Tracking
+            - name: REDIS_HOST
+              value: "redis-master"
+            - name: REDIS_PORT
+              value: "6379"
+            - name: REDIS_PASSWORD
+              value: "redis_password"
+            - name: REDIS_SENTINEL_HOSTS
+              value: "redis-sentinel-0:26379,redis-sentinel-1:26379,redis-sentinel-2:26379"
+            - name: REDIS_SENTINEL_MASTER_NAME
+              value: "mymaster"
+          resources:
+            requests:
+              cpu: "200m"          # Training is CPU-intensive
+              memory: "512Mi"      # PyTorch models need memory
+            limits:
+              cpu: "2000m"         # Allow burst for training
+              memory: "2Gi"        # Large models may need more
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8003
+            initialDelaySeconds: 15
+            periodSeconds: 15
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8003
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: model-train-service
+  labels:
+    app: model-train-service
+spec:
+  selector:
+    app: model-train-service
+  ports:
+    - protocol: TCP
+      port: 8003
+      targetPort: 8003
+  type: ClusterIP
+

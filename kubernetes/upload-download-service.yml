@@ -31,15 +31,23 @@ spec:
             - name: S3_USE_SSL
               value: "false"
             # PostgreSQL Configuration
+            # Use postgres-primary to ensure writes go to primary (not read replicas)
             - name: DATABASE_URL
-              value: "postgresql://rllabs:rllabs_password@postgres/upload_download_db"
+              value: "postgresql://rllabs:rllabs_password@postgres-primary/upload_download_db"
             # Redis Configuration
             - name: REDIS_HOST
               value: "redis"
             - name: REDIS_PORT
               value: "6379"
+            - name: REDIS_PASSWORD
+              value: "redis_password"
             - name: REDIS_URL
-              value: "redis://redis:6379/0"
+              value: "redis://:redis_password@redis:6379/0"
+            # Redis Sentinel Configuration (for automatic failover)
+            - name: REDIS_SENTINEL_HOSTS
+              value: "redis-sentinel-0.redis-sentinel:26379,redis-sentinel-1.redis-sentinel:26379,redis-sentinel-2.redis-sentinel:26379"
+            - name: REDIS_SENTINEL_MASTER_NAME
+              value: "mymaster"
             # RabbitMQ Configuration
             - name: RABBITMQ_HOST
               value: "rabbitmq"
@@ -56,7 +64,7 @@ spec:
               path: /health
               port: 8002
             initialDelaySeconds: 10
-            periodSeconds: 5
+            periodSeconds: 15  # Increased from 5s to reduce load
             timeoutSeconds: 5
             failureThreshold: 5
           livenessProbe:
@@ -64,15 +72,15 @@ spec:
               path: /health
               port: 8002
             initialDelaySeconds: 30
-            periodSeconds: 10
+            periodSeconds: 30  # Increased from 10s to reduce load
             timeoutSeconds: 5
             failureThreshold: 3
           resources:
             requests:
-              cpu: "100m"
+              cpu: "250m"  # Increased from 100m to prevent CPU throttling
               memory: "256Mi"
             limits:
-              cpu: "500m"
+              cpu: "1000m"  # Increased from 500m (2x requests minimum)
               memory: "512Mi"
 ---
 apiVersion: v1

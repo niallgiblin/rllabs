@@ -21,6 +21,7 @@ from botocore.exceptions import ClientError
 from botocore.config import Config
 from typing import Dict, List, Optional
 import logging
+import asyncio
 from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
@@ -260,7 +261,7 @@ class StorageService:
                 logger.error(f"Failed to complete multipart upload: {e}")
                 raise Exception(f"Storage error: {str(e)}")
     
-    async def abort_multipart_upload(self, object_key: str, upload_id: str):
+    async def abort_multipart_upload(self, object_key: str, upload_id: str, timeout: float = 5.0):
         """
         Cancel a multipart upload and clean up partial data
         
@@ -269,6 +270,7 @@ class StorageService:
         Args:
             object_key: S3 key for the object
             upload_id: MinIO's multipart upload ID
+            timeout: Maximum time to wait for MinIO operation (default: 5 seconds)
         """
         async with self.session.client(
             's3',
@@ -278,13 +280,20 @@ class StorageService:
             config=self.config,
         ) as s3_client:
             try:
-                await s3_client.abort_multipart_upload(
-                    Bucket=self.bucket,
-                    Key=object_key,
-                    UploadId=upload_id
+                # Add timeout: fail fast if MinIO is slow (prevents 7-13s blocking)
+                await asyncio.wait_for(
+                    s3_client.abort_multipart_upload(
+                        Bucket=self.bucket,
+                        Key=object_key,
+                        UploadId=upload_id
+                    ),
+                    timeout=timeout
                 )
                 logger.info(f"Aborted multipart upload: {object_key}")
                 
+            except asyncio.TimeoutError:
+                logger.warning(f"MinIO abort timeout ({timeout}s) for {object_key} - cleanup may be incomplete")
+                # Don't raise - best effort cleanup, timeout is acceptable
             except ClientError as e:
                 logger.warning(f"Failed to abort multipart upload: {e}")
                 # Don't raise - best effort cleanup

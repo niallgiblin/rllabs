@@ -7,7 +7,7 @@ sqlalchemy==2.0.23
 psycopg2-binary==2.9.9
 
 # Redis for idempotency and caching
-redis==5.0.1
+redis[asyncio]>=5.0.1  # Async Redis client for non-blocking operations (includes asyncio support)
 
 # S3/MinIO client with async support
 aioboto3

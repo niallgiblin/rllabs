@@ -1,0 +1,56 @@
+# Redis Exporter for Prometheus Monitoring
+# Exposes metrics for replication, Sentinel status, and Redis health
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-exporter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis-exporter
+  template:
+    metadata:
+      labels:
+        app: redis-exporter
+    spec:
+      containers:
+        - name: redis-exporter
+          image: oliver006/redis_exporter:v1.55.0
+          ports:
+            - containerPort: 9121
+              name: metrics
+          env:
+            # Connect to Redis master (or use Sentinel)
+            - name: REDIS_ADDR
+              value: "redis-master-0.redis-master:6379"
+            - name: REDIS_PASSWORD
+              value: "redis_password"
+            # Enable Sentinel support
+            - name: REDIS_EXPORTER_INCLUDE_SYSTEM_METRICS
+              value: "true"
+            - name: REDIS_EXPORTER_CHECK_KEYS
+              value: ""
+            - name: REDIS_EXPORTER_SCRIPT
+              value: ""
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "100m"
+              memory: "128Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-exporter
+spec:
+  selector:
+    app: redis-exporter
+  ports:
+    - protocol: TCP
+      port: 9121
+      targetPort: 9121
+

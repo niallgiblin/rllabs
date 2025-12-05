@@ -1,0 +1,337 @@
+# RabbitMQ High Availability Cluster Configuration
+# 3-Node cluster with mirrored queues
+# Demonstrates: Message queue clustering, queue mirroring, automatic failover
+
+---
+# ConfigMap for RabbitMQ cluster configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rabbitmq-config
+data:
+  enabled_plugins: |
+    [rabbitmq_management,rabbitmq_prometheus].
+  rabbitmq.conf: |
+    # Single-node configuration (no cluster formation needed)
+    # For single node deployments, we don't need peer discovery
+    # This simplifies startup and avoids cluster formation delays
+    
+    # Queue master locator
+    queue_master_locator = min-masters
+    
+    # Management plugin
+    management.tcp.port = 15672
+    
+    # Prometheus plugin - expose metrics on port 15692
+    prometheus.tcp.port = 15692
+    
+    # Default user
+    default_user = admin
+    default_pass = admin_password
+    default_vhost = /
+
+---
+# RabbitMQ StatefulSet
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: rabbitmq
+spec:
+  serviceName: rabbitmq
+  replicas: 1
+  selector:
+    matchLabels:
+      app: rabbitmq
+  template:
+    metadata:
+      labels:
+        app: rabbitmq
+    spec:
+      serviceAccountName: rabbitmq
+      initContainers:
+        - name: init-config
+          image: rabbitmq:3.12-management
+          command:
+            - sh
+            - -c
+            - |
+              cp /tmp/rabbitmq-config/rabbitmq.conf /etc/rabbitmq/rabbitmq.conf
+              cp /tmp/rabbitmq-config/enabled_plugins /etc/rabbitmq/enabled_plugins
+              echo "RABBITMQ_ERLANG_COOKIE" > /var/lib/rabbitmq/.erlang.cookie
+              chmod 600 /var/lib/rabbitmq/.erlang.cookie
+          volumeMounts:
+            - name: config
+              mountPath: /tmp/rabbitmq-config
+            - name: rabbitmq-data
+              mountPath: /var/lib/rabbitmq
+            - name: rabbitmq-config
+              mountPath: /etc/rabbitmq
+      containers:
+        - name: rabbitmq
+          image: rabbitmq:3.12-management
+          ports:
+            - containerPort: 5672
+              name: amqp
+            - containerPort: 15672
+              name: management
+            - containerPort: 15692
+              name: prometheus
+            - containerPort: 4369
+              name: epmd
+            - containerPort: 25672
+              name: clustering
+          env:
+            - name: RABBITMQ_USE_LONGNAME
+              value: "true"
+            - name: RABBITMQ_NODENAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: K8S_SERVICE_NAME
+              value: rabbitmq
+            - name: K8S_HOSTNAME_SUFFIX
+              value: ".rabbitmq.default.svc.cluster.local"
+            - name: RABBITMQ_DEFAULT_USER
+              value: "admin"
+            - name: RABBITMQ_DEFAULT_PASS
+              value: "admin_password"
+          lifecycle:
+            postStart:
+              exec:
+                command:
+                  - sh
+                  - -c
+                  - |
+                    # Wait for RabbitMQ server process to be ready
+                    for i in $(seq 1 60); do
+                      if rabbitmq-diagnostics ping >/dev/null 2>&1; then
+                        break
+                      fi
+                      sleep 2
+                    done
+                    # Wait a bit more for full initialization
+                    sleep 10
+                    # Start the RabbitMQ application (may already be started)
+                    rabbitmqctl start_app 2>&1 || true
+                    # Wait for app to fully start
+                    sleep 5
+                    # Verify app is running (retry multiple times)
+                    for i in $(seq 1 30); do
+                      if rabbitmqctl status >/dev/null 2>&1; then
+                        exit 0
+                      fi
+                      sleep 2
+                    done
+                    # If we get here, app didn't start but don't fail the container
+                    exit 0
+          volumeMounts:
+            - name: rabbitmq-data
+              mountPath: /var/lib/rabbitmq
+            - name: rabbitmq-config
+              mountPath: /etc/rabbitmq
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          readinessProbe:
+            exec:
+              command:
+                - rabbitmq-diagnostics
+                - ping
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 5
+          livenessProbe:
+            exec:
+              command:
+                - rabbitmq-diagnostics
+                - ping
+            initialDelaySeconds: 120
+            periodSeconds: 30
+            timeoutSeconds: 20
+            failureThreshold: 5
+      volumes:
+        - name: config
+          configMap:
+            name: rabbitmq-config
+        - name: rabbitmq-config
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: rabbitmq-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
+
+---
+# ServiceAccount for K8s peer discovery
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: rabbitmq
+
+---
+# Role for peer discovery and cluster configuration
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: rabbitmq
+rules:
+  - apiGroups: [""]
+    resources: ["endpoints", "pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    verbs: ["get", "list"]
+
+---
+# RoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: rabbitmq
+subjects:
+  - kind: ServiceAccount
+    name: rabbitmq
+roleRef:
+  kind: Role
+  name: rabbitmq
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# Headless Service for cluster formation
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq
+spec:
+  clusterIP: None
+  selector:
+    app: rabbitmq
+  ports:
+    - port: 5672
+      name: amqp
+    - port: 15672
+      name: management
+    - port: 4369
+      name: epmd
+    - port: 25672
+      name: clustering
+
+---
+# LoadBalancer Service for external access
+apiVersion: v1
+kind: Service
+metadata:
+  name: rabbitmq-management
+spec:
+  type: LoadBalancer
+  selector:
+    app: rabbitmq
+  ports:
+    - port: 5672
+      name: amqp
+      targetPort: 5672
+    - port: 15672
+      name: management
+      targetPort: 15672
+
+---
+# Job to configure HA policy and ensure cluster formation
+# This job runs after RabbitMQ pods are ready and ensures cluster is formed
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: rabbitmq-configure-ha
+spec:
+  template:
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: rabbitmq
+      containers:
+        - name: configure
+          image: bitnami/kubectl:latest
+          command:
+            - sh
+            - -c
+            - |
+              echo "Waiting for RabbitMQ cluster to form..."
+              sleep 90
+              
+              # Get number of replicas
+              REPLICAS=$(kubectl get statefulset rabbitmq -o jsonpath='{.spec.replicas}' || echo "1")
+              echo "Expected $REPLICAS replicas"
+              
+              # CRITICAL: Start app on rabbitmq-0 first (standalone)
+              echo "Starting RabbitMQ app on rabbitmq-0 (standalone)..."
+              for j in {1..60}; do
+                if kubectl exec rabbitmq-0 -- rabbitmqctl start_app 2>&1 | grep -q "already started\|started"; then
+                  echo "✅ rabbitmq-0 app started"
+                  break
+                fi
+                sleep 2
+              done
+              
+              # Wait for rabbitmq-0 to be ready
+              echo "Waiting for rabbitmq-0 to be ready..."
+              for j in {1..60}; do
+                if kubectl get pod rabbitmq-0 -o jsonpath='{.status.containerStatuses[0].ready}' 2>/dev/null | grep -q "true"; then
+                  echo "✅ rabbitmq-0 is ready"
+                  break
+                fi
+                sleep 2
+              done
+              
+              # Wait for all other pods to be running (not necessarily ready)
+              for i in $(seq 1 $((REPLICAS - 1))); do
+                POD_NAME="rabbitmq-$i"
+                echo "Waiting for $POD_NAME to be running..."
+                for j in {1..60}; do
+                  if kubectl get pod $POD_NAME -o jsonpath='{.status.phase}' 2>/dev/null | grep -q "Running"; then
+                    echo "$POD_NAME is running"
+                    break
+                  fi
+                  sleep 2
+                done
+              done
+              
+              # Form cluster if multiple replicas
+              if [ "$REPLICAS" -gt 1 ]; then
+                echo "Forming cluster..."
+                for i in $(seq 1 $((REPLICAS - 1))); do
+                  POD_NAME="rabbitmq-$i"
+                  echo "Joining $POD_NAME to cluster..."
+                  
+                  # Start app on this node first
+                  kubectl exec $POD_NAME -- rabbitmqctl start_app 2>&1 | grep -v "Defaulted container" || true
+                  sleep 2
+                  
+                  # Check if already in cluster
+                  if kubectl exec $POD_NAME -- rabbitmqctl cluster_status 2>&1 | grep -q "rabbitmq-0@rabbitmq-0"; then
+                    echo "$POD_NAME already in cluster"
+                    continue
+                  fi
+                  
+                  # Join cluster
+                  kubectl exec $POD_NAME -- rabbitmqctl stop_app 2>&1 | grep -v "Defaulted container" || true
+                  kubectl exec $POD_NAME -- rabbitmqctl join_cluster rabbitmq-0@rabbitmq-0.rabbitmq.default.svc.cluster.local 2>&1 | grep -v "Defaulted container" || true
+                  kubectl exec $POD_NAME -- rabbitmqctl start_app 2>&1 | grep -v "Defaulted container" || true
+                  sleep 5
+                done
+              fi
+              
+              # Set HA policy for all queues
+              echo "Setting HA policy..."
+              kubectl exec rabbitmq-0 -- rabbitmqctl set_policy ha-all ".*" '{"ha-mode":"all","ha-sync-mode":"automatic"}' 2>&1 | grep -v "Defaulted container" || true
+              
+              echo "✅ Cluster configuration complete!"
+

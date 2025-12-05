@@ -1,0 +1,384 @@
+---
+# Headless Service for MongoDB StatefulSet
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongodb
+  labels:
+    app: mongodb
+spec:
+  clusterIP: None  # Headless service for StatefulSet
+  ports:
+    - port: 27017
+      targetPort: 27017
+      name: mongodb
+  selector:
+    app: mongodb
+---
+# StatefulSet for MongoDB Replica Set
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mongodb
+spec:
+  serviceName: mongodb
+  replicas: 3
+  selector:
+    matchLabels:
+      app: mongodb
+  template:
+    metadata:
+      labels:
+        app: mongodb
+    spec:
+      containers:
+        - name: mongodb
+          image: mongo:7.0
+          ports:
+            - containerPort: 27017
+              name: mongodb
+          command:
+            - mongod
+            - --replSet
+            - rs0
+            - --bind_ip_all
+            - --port
+            - "27017"
+          env:
+            - name: MONGO_INITDB_ROOT_USERNAME
+              value: ""
+            - name: MONGO_INITDB_ROOT_PASSWORD
+              value: ""
+          volumeMounts:
+            - name: mongodb-data
+              mountPath: /data/db
+            - name: mongodb-config
+              mountPath: /data/configdb
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          # Probes for main MongoDB container
+          # More generous timeouts for replica set initialization
+          readinessProbe:
+            exec:
+              command:
+                - mongosh
+                - --eval
+                - "db.adminCommand('ping')"
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 15
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command:
+                - mongosh
+                - --eval
+                - "db.adminCommand('ping')"
+            initialDelaySeconds: 120
+            periodSeconds: 30
+            timeoutSeconds: 15
+            failureThreshold: 6
+        # Sidecar container to initialize replica set
+        - name: mongodb-init
+          image: mongo:7.0
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set +e  # Don't exit on errors, handle them explicitly
+              
+              # Function to sleep forever after completion (prevents container restart)
+              completed() {
+                echo "✅ Sidecar complete, sleeping to prevent restart..."
+                exec sleep infinity
+              }
+              
+              POD_INDEX=$(echo $HOSTNAME | sed 's/mongodb-//')
+              NAMESPACE=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace 2>/dev/null || echo "default")
+              
+              echo "MongoDB Replica Set Initializer (pod index: $POD_INDEX, namespace: $NAMESPACE)"
+              
+              # Use localhost since containers in same pod share network namespace
+              MONGO_HOST="localhost"
+              
+              # Only initialize from the first pod (mongodb-0)
+              if [ "$POD_INDEX" != "0" ]; then
+                echo "Not the first pod (index: $POD_INDEX), waiting for replica set initialization..."
+                # Wait for local MongoDB to be ready first
+                MAX_RETRIES=60
+                RETRY=0
+                while [ $RETRY -lt $MAX_RETRIES ]; do
+                  if mongosh --host "$MONGO_HOST:27017" --eval "db.adminCommand('ping')" > /dev/null 2>&1; then
+                    echo "✅ Local MongoDB is ready"
+                    break
+                  fi
+                  RETRY=$((RETRY + 1))
+                  sleep 2
+                done
+                # Wait for replica set to be initialized (check every 5 seconds)
+                MAX_WAIT=300
+                WAIT_COUNT=0
+                while [ $WAIT_COUNT -lt $MAX_WAIT ]; do
+                  if mongosh --host "$MONGO_HOST:27017" --eval "rs.status()" > /dev/null 2>&1; then
+                    echo "✅ Replica set is initialized"
+                    completed
+                  fi
+                  WAIT_COUNT=$((WAIT_COUNT + 5))
+                  sleep 5
+                done
+                echo "⚠️  Replica set not initialized after $MAX_WAIT seconds"
+                completed
+              fi
+              
+              # Wait for local MongoDB to be ready (mongodb-0)
+              echo "Waiting for local MongoDB to be ready..."
+              RETRY_COUNT=0
+              while [ $RETRY_COUNT -lt 120 ]; do
+                PING_RESULT=$(mongosh --host "$MONGO_HOST:27017" --eval "db.adminCommand('ping')" 2>&1)
+                PING_EXIT=$?
+                if [ $PING_EXIT -eq 0 ] && echo "$PING_RESULT" | grep -q "ok.*1"; then
+                  echo "✅ Local MongoDB is ready (attempt $RETRY_COUNT)"
+                  break
+                fi
+                RETRY_COUNT=$((RETRY_COUNT + 1))
+                if [ $((RETRY_COUNT % 10)) -eq 0 ]; then
+                  echo "Still waiting for MongoDB... (attempt $RETRY_COUNT, exit code: $PING_EXIT)"
+                fi
+                sleep 2
+              done
+              
+              if [ $RETRY_COUNT -eq 120 ]; then
+                echo "❌ MongoDB not ready after 120 attempts"
+                exit 1
+              fi
+              
+              # Wait for all MongoDB pods to be ready
+              echo "Waiting for all MongoDB pods to be ready..."
+              for i in 0 1 2; do
+                HOST_SHORT="mongodb-${i}.mongodb"
+                HOST_FQDN="mongodb-${i}.mongodb.${NAMESPACE}.svc.cluster.local"
+                
+                MAX_RETRIES=60
+                RETRY=0
+                while [ $RETRY -lt $MAX_RETRIES ]; do
+                  if mongosh --host "$HOST_SHORT:27017" --eval "db.adminCommand('ping')" > /dev/null 2>&1 || \
+                     mongosh --host "$HOST_FQDN:27017" --eval "db.adminCommand('ping')" > /dev/null 2>&1; then
+                    echo "✅ mongodb-${i} is ready"
+                    break
+                  fi
+                  RETRY=$((RETRY + 1))
+                  if [ $RETRY -lt $MAX_RETRIES ]; then
+                    sleep 2
+                  fi
+                done
+                
+                if [ $RETRY -eq $MAX_RETRIES ]; then
+                  echo "⚠️  mongodb-${i} not ready after $MAX_RETRIES attempts (continuing anyway)"
+                fi
+              done
+              
+              # Check if replica set is already initialized
+              echo "Checking replica set status..."
+              if mongosh --host "$MONGO_HOST:27017" --eval "rs.status()" > /dev/null 2>&1; then
+                echo "✅ Replica set already initialized"
+                mongosh --host "$MONGO_HOST:27017" --eval "rs.status()" | head -20
+                completed
+              fi
+              
+              # Wait for all MongoDB pods to be ready before initializing
+              echo "Waiting for all MongoDB pods to be ready..."
+              for i in 0 1 2; do
+                HOST_SHORT="mongodb-${i}.mongodb"
+                HOST_FQDN="mongodb-${i}.mongodb.${NAMESPACE}.svc.cluster.local"
+                
+                MAX_RETRIES=60
+                RETRY=0
+                while [ $RETRY -lt $MAX_RETRIES ]; do
+                  if mongosh --host "$HOST_SHORT:27017" --eval "db.adminCommand('ping')" > /dev/null 2>&1 || \
+                     mongosh --host "$HOST_FQDN:27017" --eval "db.adminCommand('ping')" > /dev/null 2>&1; then
+                    echo "✅ mongodb-${i} is ready"
+                    break
+                  fi
+                  RETRY=$((RETRY + 1))
+                  if [ $RETRY -lt $MAX_RETRIES ]; then
+                    sleep 2
+                  fi
+                done
+                
+                if [ $RETRY -eq $MAX_RETRIES ]; then
+                  echo "⚠️  mongodb-${i} not ready after $MAX_RETRIES attempts (continuing anyway)"
+                fi
+              done
+              
+              # Initialize replica set with FQDN for reliability
+              echo "Initializing replica set with FQDN hostnames..."
+              mongosh --host "$MONGO_HOST:27017" <<EOF
+              try {
+                rs.initiate({
+                  _id: "rs0",
+                  members: [
+                    { _id: 0, host: "mongodb-0.mongodb.${NAMESPACE}.svc.cluster.local:27017", priority: 1 },
+                    { _id: 1, host: "mongodb-1.mongodb.${NAMESPACE}.svc.cluster.local:27017", priority: 0.5 },
+                    { _id: 2, host: "mongodb-2.mongodb.${NAMESPACE}.svc.cluster.local:27017", priority: 0.5 }
+                  ]
+                })
+                print("✅ Replica set initialized successfully")
+              } catch (err) {
+                if (err.message.includes("already initialized") || err.message.includes("replica set configuration already exists")) {
+                  print("✅ Replica set already initialized")
+                } else {
+                  print("❌ Error initializing replica set: " + err.message)
+                  throw err
+                }
+              }
+              EOF
+              
+              # Wait for PRIMARY to be elected
+              echo "Waiting for PRIMARY to be elected..."
+              MAX_WAIT=60
+              WAIT_COUNT=0
+              while [ $WAIT_COUNT -lt $MAX_WAIT ]; do
+                STATUS=$(mongosh --host "$MONGO_HOST:27017" --eval "rs.status().myState" --quiet 2>/dev/null || echo "")
+                if [ "$STATUS" = "1" ]; then
+                  echo "✅ PRIMARY elected successfully"
+                  mongosh --host "$MONGO_HOST:27017" --eval "rs.status()" | head -30
+                  completed
+                fi
+                WAIT_COUNT=$((WAIT_COUNT + 1))
+                sleep 2
+              done
+              
+              echo "⚠️  PRIMARY not elected after $MAX_WAIT attempts"
+              mongosh --host "$MONGO_HOST:27017" --eval "rs.status()"
+              completed
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "256Mi"   # mongosh (Node.js) needs more memory
+            limits:
+              cpu: "200m"
+              memory: "512Mi"   # Increased from 128Mi - mongosh was OOMKilled
+          # Note: Sidecar container doesn't need readiness/liveness probes
+          # It's a helper that runs the init script - probes would just add OOM pressure
+          # The main mongodb container has its own probes
+  volumeClaimTemplates:
+    - metadata:
+        name: mongodb-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
+    - metadata:
+        name: mongodb-config
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 100Mi
+---
+# Job to Initialize MongoDB Replica Set (backup initialization method)
+# Note: The StatefulSet now has an init container, but this job can be used
+# for manual recovery if needed
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mongodb-init
+spec:
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: mongodb-init
+          image: mongo:7.0
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -e
+              NAMESPACE=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace || echo "default")
+              
+              echo "Waiting for MongoDB pods to be ready (namespace: $NAMESPACE)..."
+              sleep 10
+              
+              # Wait for all MongoDB pods (try both short and FQDN)
+              for i in 0 1 2; do
+                HOST_SHORT="mongodb-${i}.mongodb"
+                HOST_FQDN="mongodb-${i}.mongodb.${NAMESPACE}.svc.cluster.local"
+                
+                MAX_RETRIES=60
+                RETRY=0
+                while [ $RETRY -lt $MAX_RETRIES ]; do
+                  if mongosh --host "$HOST_SHORT:27017" --eval "db.adminCommand('ping')" > /dev/null 2>&1 || \
+                     mongosh --host "$HOST_FQDN:27017" --eval "db.adminCommand('ping')" > /dev/null 2>&1; then
+                    echo "mongodb-${i} is ready"
+                    break
+                  fi
+                  RETRY=$((RETRY + 1))
+                  if [ $RETRY -lt $MAX_RETRIES ]; then
+                    sleep 2
+                  fi
+                done
+                
+                if [ $RETRY -eq $MAX_RETRIES ]; then
+                  echo "ERROR: mongodb-${i} not ready after $MAX_RETRIES attempts"
+                  exit 1
+                fi
+              done
+              
+              # Check if replica set is already initialized
+              echo "Checking replica set status..."
+              if mongosh --host mongodb-0.mongodb:27017 --eval "rs.status()" > /dev/null 2>&1; then
+                echo "Replica set already initialized"
+                mongosh --host mongodb-0.mongodb:27017 --eval "rs.status()"
+                exit 0
+              fi
+              
+              # Initialize replica set with FQDN for reliability
+              echo "Initializing replica set with FQDN hostnames..."
+              mongosh --host mongodb-0.mongodb:27017 <<EOF
+              try {
+                rs.initiate({
+                  _id: "rs0",
+                  members: [
+                    { _id: 0, host: "mongodb-0.mongodb.${NAMESPACE}.svc.cluster.local:27017", priority: 1 },
+                    { _id: 1, host: "mongodb-1.mongodb.${NAMESPACE}.svc.cluster.local:27017", priority: 0.5 },
+                    { _id: 2, host: "mongodb-2.mongodb.${NAMESPACE}.svc.cluster.local:27017", priority: 0.5 }
+                  ]
+                })
+                print("✅ Replica set initialized successfully")
+              } catch (err) {
+                if (err.message.includes("already initialized")) {
+                  print("Replica set already initialized")
+                } else {
+                  print("Error initializing replica set: " + err.message)
+                  throw err
+                }
+              }
+              EOF
+              
+              # Wait for PRIMARY to be elected
+              echo "Waiting for PRIMARY to be elected..."
+              MAX_WAIT=60
+              WAIT_COUNT=0
+              while [ $WAIT_COUNT -lt $MAX_WAIT ]; do
+                STATUS=$(mongosh --host mongodb-0.mongodb:27017 --eval "rs.status().myState" --quiet 2>/dev/null || echo "")
+                if [ "$STATUS" = "1" ]; then
+                  echo "✅ PRIMARY elected successfully"
+                  mongosh --host mongodb-0.mongodb:27017 --eval "rs.status()"
+                  exit 0
+                fi
+                WAIT_COUNT=$((WAIT_COUNT + 1))
+                sleep 2
+              done
+              
+              echo "WARNING: PRIMARY not elected after $MAX_WAIT attempts"
+              mongosh --host mongodb-0.mongodb:27017 --eval "rs.status()"
+              exit 1
+---
+

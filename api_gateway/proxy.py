@@ -26,6 +26,35 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
+# Global HTTP client with connection pooling for better performance
+# This is reused across all requests instead of creating new clients each time
+_http_client: Optional[httpx.AsyncClient] = None
+
+def get_http_client() -> httpx.AsyncClient:
+    """Get or create the shared HTTP client with connection pooling"""
+    global _http_client
+    if _http_client is None:
+        _http_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(
+                30.0,      # Total timeout (kept from Phase 1 - needed for upload operations)
+                connect=5.0  # Connection timeout (kept from Phase 1)
+            ),
+            limits=httpx.Limits(
+                max_connections=200,      # REVERTED: Back to original (was 500 in Phase 2)
+                max_keepalive_connections=100,  # REVERTED: Back to original (was 250 in Phase 2)
+                keepalive_expiry=30.0     # Keep connections alive for 30s
+            ),
+            http2=True  # HTTP/2 for better multiplexing (requires httpx[http2])
+        )
+    return _http_client
+
+async def close_http_client():
+    """Close the HTTP client (call on shutdown)"""
+    global _http_client
+    if _http_client:
+        await _http_client.aclose()
+        _http_client = None
+
 # Exception for service unavailable errors
 class ServiceUnavailableError(HTTPException):
     """Raised when a backend service is unavailable"""
@@ -105,8 +134,9 @@ async def proxy_request(
             # Fallback: use function directly without circuit breaker
             request_func = _make_request
         
-        # Retry with exponential backoff
-        max_retries = 3
+        # Retry with exponential backoff for transient failures
+        # Reduced retries to prevent cascading delays - fail fast instead
+        max_retries = 1  # Reduced from 3: fail fast instead of retrying into timeout
         for attempt in range(max_retries):
             try:
                 response = await request_func(
@@ -115,6 +145,9 @@ async def proxy_request(
                     body=body,
                     method=request.method
                 )
+                
+                # Don't retry on 5xx errors - fail fast to prevent timeout cascades
+                # Backend services should handle retries internally if needed
                 return response
             except CircuitBreakerError as e:
                 logger.warning(f"Circuit breaker open for {service_name}: {e}")
@@ -138,22 +171,60 @@ async def proxy_request(
         
     except HTTPException:
         raise
+    except httpx.HTTPStatusError as e:
+        # Backend returned an error status code
+        logger.error(
+            f"Backend service {service_name} returned error: {e.response.status_code}",
+            extra={
+                "service": service_name,
+                "status_code": e.response.status_code,
+                "url": target_url,
+                "response_text": e.response.text[:500] if hasattr(e.response, 'text') else None
+            }
+        )
+        # Pass through the backend's status code
+        raise HTTPException(
+            status_code=e.response.status_code,
+            detail=f"Backend service error: {e.response.status_code}"
+        )
     except Exception as e:
-        logger.error(f"Unexpected error proxying to {service_name}: {e}")
+        logger.error(
+            f"Unexpected error proxying to {service_name}: {e}",
+            exc_info=True,
+            extra={
+                "service": service_name,
+                "url": target_url,
+                "error_type": type(e).__name__
+            }
+        )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Error connecting to service: {str(e)}"
         )
 
 async def _make_request(target_url: str, headers: dict, body: bytes, method: str) -> httpx.Response:
-    """Internal helper to make HTTP request"""
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        return await client.request(
-            method=method,
-            url=target_url,
-            headers=headers,
-            content=body,
+    """Internal helper to make HTTP request using shared connection pool"""
+    client = get_http_client()
+    response = await client.request(
+        method=method,
+        url=target_url,
+        headers=headers,
+        content=body,
+    )
+    
+    # Log 5xx errors for debugging
+    if response.status_code >= 500:
+        logger.error(
+            f"Backend service returned {response.status_code} for {method} {target_url}",
+            extra={
+                "status_code": response.status_code,
+                "method": method,
+                "url": target_url,
+                "response_preview": response.text[:500] if hasattr(response, 'text') else None
+            }
         )
+    
+    return response
 
 def get_target_service(path: str) -> Optional[str]:
     """

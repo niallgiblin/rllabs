@@ -50,6 +50,17 @@ data:
         cluster: 'rllabs'
         environment: 'development'
     
+    # Alertmanager configuration
+    alerting:
+      alertmanagers:
+        - static_configs:
+            - targets:
+              - alertmanager:9093
+    
+    # Load alerting rules
+    rule_files:
+      - /etc/prometheus/alerts/*.yml
+    
     scrape_configs:
       # Prometheus itself
       - job_name: 'prometheus'
@@ -110,6 +121,42 @@ data:
             target_label: namespace
         metrics_path: '/metrics'
       
+      # Collaboration Service
+      - job_name: 'collaboration-service'
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            action: keep
+            regex: collaboration-service
+          - source_labels: [__meta_kubernetes_pod_ip]
+            action: replace
+            target_label: __address__
+            replacement: $1:8000
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+        metrics_path: '/metrics'
+      
+      # Training Service
+      - job_name: 'model-train-service'
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            action: keep
+            regex: model-train-service
+          - source_labels: [__meta_kubernetes_pod_ip]
+            action: replace
+            target_label: __address__
+            replacement: $1:8003
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+        metrics_path: '/metrics'
+      
       # Kubernetes API server
       - job_name: 'kubernetes-apiservers'
         kubernetes_sd_configs:
@@ -134,6 +181,116 @@ data:
         relabel_configs:
           - action: labelmap
             regex: __meta_kubernetes_node_label_(.+)
+      
+      # PostgreSQL Exporter (for replication metrics)
+      # Note: Requires postgres-exporter deployment
+      - job_name: 'postgres-exporter'
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            action: keep
+            regex: postgres-exporter
+          - source_labels: [__meta_kubernetes_pod_ip]
+            action: replace
+            target_label: __address__
+            replacement: $1:9187
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+      
+      # Redis Exporter (for replication and Sentinel metrics)
+      # Note: Requires redis-exporter deployment
+      - job_name: 'redis-exporter'
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            action: keep
+            regex: redis-exporter
+          - source_labels: [__meta_kubernetes_pod_ip]
+            action: replace
+            target_label: __address__
+            replacement: $1:9121
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+      
+      # RabbitMQ Management API (for cluster metrics)
+      - job_name: 'rabbitmq-management'
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            action: keep
+            regex: rabbitmq
+          - source_labels: [__meta_kubernetes_pod_ip]
+            action: replace
+            target_label: __address__
+            replacement: $1:15692
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+        metrics_path: '/metrics'
+        basic_auth:
+          username: 'admin'
+          password: 'admin_password'
+      
+      # MongoDB Exporter (for replica set metrics)
+      # Note: Requires mongodb-exporter deployment
+      - job_name: 'mongodb-exporter'
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            action: keep
+            regex: mongodb-exporter
+          - source_labels: [__meta_kubernetes_pod_ip]
+            action: replace
+            target_label: __address__
+            replacement: $1:9216
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+      
+      # MinIO Exporter (recommended approach)
+      # Uses minio-exporter deployment that handles authentication
+      - job_name: 'minio-exporter'
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            action: keep
+            regex: minio-exporter
+          - source_labels: [__meta_kubernetes_pod_ip]
+            action: replace
+            target_label: __address__
+            replacement: $1:9091
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+        metrics_path: '/metrics'
+      
+      # MinIO Direct Metrics (alternative - requires AWS signature auth)
+      # Uncomment if using direct MinIO metrics endpoint with AWS auth configured
+      # - job_name: 'minio'
+      #   kubernetes_sd_configs:
+      #     - role: pod
+      #   relabel_configs:
+      #     - source_labels: [__meta_kubernetes_pod_label_v1_min_io_tenant]
+      #       action: keep
+      #       regex: minio
+      #     - source_labels: [__meta_kubernetes_pod_label_v1_min_io_pool]
+      #       action: keep
+      #       regex: pool-0
+      #     - source_labels: [__meta_kubernetes_pod_container_name]
+      #       action: keep
+      #       regex: minio
+      #     - source_labels: [__meta_kubernetes_pod_ip]
+      #       action: replace
+      #       target_label: __address__
+      #       replacement: $1:9000
+      #     - source_labels: [__meta_kubernetes_pod_name]
+      #       target_label: pod
+      #     - source_labels: [__meta_kubernetes_pod_label_v1_min_io_pool]
+      #       target_label: pool
+      #   metrics_path: '/minio/v2/metrics/cluster'
+      #   # Note: Requires AWS signature authentication
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -165,6 +322,8 @@ spec:
           volumeMounts:
             - name: prometheus-config
               mountPath: /etc/prometheus
+            - name: prometheus-alerts
+              mountPath: /etc/prometheus/alerts
             - name: prometheus-storage
               mountPath: /prometheus
           resources:
@@ -178,6 +337,9 @@ spec:
         - name: prometheus-config
           configMap:
             name: prometheus-config
+        - name: prometheus-alerts
+          configMap:
+            name: prometheus-alerts
         - name: prometheus-storage
           emptyDir: {}
 ---

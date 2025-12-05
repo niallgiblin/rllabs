@@ -1,4 +1,40 @@
-from fastapi import FastAPI, HTTPException, status
+"""
+Collaboration Service - Main Application
+========================================
+Manages comments and collaboration features for models.
+"""
+
+# =============================================================================
+# OBSERVABILITY SETUP (must be first, before other imports)
+# =============================================================================
+import os
+import sys
+
+# Add shared module to path
+shared_path = os.path.join(os.path.dirname(__file__), 'shared')
+if os.path.exists(shared_path) and shared_path not in sys.path:
+    sys.path.insert(0, shared_path)
+
+SERVICE_NAME = os.getenv("OTEL_SERVICE_NAME", "collaboration-service")
+
+# Initialize structured logging and tracing
+try:
+    from observability import setup_logging, setup_tracing, get_logger
+    
+    json_output = os.getenv("KUBERNETES_SERVICE_HOST") is not None
+    setup_logging(service_name=SERVICE_NAME, json_output=json_output)
+    setup_tracing(service_name=SERVICE_NAME)
+    logger = get_logger(__name__)
+except ImportError:
+    import logging
+    logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger(__name__)
+    logger.warning("Observability module not available, using basic logging")
+
+# =============================================================================
+# APPLICATION IMPORTS
+# =============================================================================
+from fastapi import FastAPI, HTTPException, status, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from datetime import datetime
@@ -11,8 +47,11 @@ from helpers import doc_to_response, build_tree, get_model_creator
 from database import comments_collection, cache, create_indexes
 from events import publish_comment_created, start_event_subscriber
 
-
-app = FastAPI()
+app = FastAPI(
+    title="Collaboration Service",
+    description="Service for managing comments and collaboration on models",
+    version="1.0.0"
+)
 
 
 # Add CORS Middleware --> Allows browser to fetch data
@@ -23,6 +62,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Add Prometheus metrics
+try:
+    from prometheus_fastapi_instrumentator import Instrumentator
+    instrumentator = Instrumentator()
+    instrumentator.instrument(app).expose(app)
+    logger.info("Prometheus metrics enabled")
+except ImportError:
+    logger.warning("prometheus-fastapi-instrumentator not available - metrics disabled")
 
 
 
@@ -35,10 +83,63 @@ def startup():
     
     create_indexes()
     
+    # Pre-warm model creator cache for better hit rates
+    from helpers import prewarm_model_creator_cache
+    try:
+        prewarm_model_creator_cache()
+        logger.info("Model creator cache pre-warmed")
+    except Exception as e:
+        logger.warning(f"Failed to pre-warm cache: {e}")
+    
     # Start event subscriber in background thread
     thread = threading.Thread(target=start_event_subscriber, daemon=True)
     thread.start()
-    print("✅ Event subscriber started")
+    logger.info("Event subscriber started")
+
+# Health check endpoint for Kubernetes readiness/liveness probes - Fast (no dependencies)
+@app.get("/health", tags=["Monitoring"])
+def health_check():
+    """
+    Fast health check endpoint for Kubernetes probes.
+    Returns immediately without checking dependencies to avoid unnecessary database load.
+    """
+    return {"status": "ok"}
+
+# Detailed health check with dependency verification
+@app.get("/health/detailed", tags=["Monitoring"])
+def detailed_health_check():
+    """
+    Detailed health check endpoint with dependency verification.
+    Use this for monitoring dashboards, not for Kubernetes probes.
+    """
+    try:
+        # Check MongoDB connectivity
+        comments_collection.database.client.admin.command('ping')
+        mongo_status = "online"
+    except Exception as e:
+        logger.error(f"MongoDB health check failed: {e}")
+        mongo_status = "offline"
+    
+    try:
+        # Check Redis connectivity
+        if cache:
+            cache.ping()
+            redis_status = "online"
+        else:
+            redis_status = "offline"
+    except Exception as e:
+        logger.error(f"Redis health check failed: {e}")
+        redis_status = "offline"
+    
+    overall_status = "ok" if mongo_status == "online" and redis_status == "online" else "degraded"
+    
+    return {
+        "service_status": overall_status,
+        "dependencies": {
+            "mongodb": mongo_status,
+            "redis": redis_status
+        }
+    }
 
 
 
@@ -46,7 +147,7 @@ def startup():
 
 
 @app.post("/models/{model_id}/comments", status_code=status.HTTP_201_CREATED)
-def create_comment(model_id: str, comment: CommentCreate):
+def create_comment(model_id: str, comment: CommentCreate, background_tasks: BackgroundTasks):
     """
     Optimistic accept --> Trust frontend, no validation
     If user is on model page, model exists
@@ -67,18 +168,28 @@ def create_comment(model_id: str, comment: CommentCreate):
     result = comments_collection.insert_one(doc)
     doc["_id"] = result.inserted_id
     
-    # Invalidate cache for this model
-    cache.delete(f"comments:{model_id}")
+    # Invalidate cache for this model (all pages and count)
+    try:
+        if cache:
+            # Delete all comment pages for this model (pattern matching)
+            # Note: Redis doesn't support pattern delete in single command, so we delete known patterns
+            # For simplicity, we'll delete the count cache and let page caches expire naturally
+            cache.delete(f"comments:count:{model_id}")
+            # Also try to delete common page patterns (fail-open if not found)
+            for page in range(1, 11):  # Delete first 10 pages (most common)
+                try:
+                    cache.delete(f"comments:{model_id}:page:{page}:limit:50")
+                except:
+                    pass
+    except Exception:
+        pass  # Fail-open: cache failures don't break the service
     
     # Get creator for response
     creator_id = get_model_creator(model_id)
     response_data = doc_to_response(doc, creator_id)
     
-    # Publish CommentCreated event
-    try:
-        publish_comment_created(response_data)
-    except Exception as e:
-        print(f"⚠️  Failed to publish CommentCreated event: {e}")
+    # Publish CommentCreated event in background (non-blocking)
+    background_tasks.add_task(publish_comment_created, response_data)
     
     return response_data
 
@@ -89,45 +200,134 @@ def create_comment(model_id: str, comment: CommentCreate):
 @app.get("/models/{model_id}/comments")
 def get_comments(model_id: str, page: int = 1, limit: int = 50):
     """
-    Get all comments for a model as nested tree
+    Get comments for a model as nested tree with pagination.
+    
+    Pagination is done at the database level for better performance.
+    Only top-level comments (no parent) are paginated; replies are always included.
+    
+    Performance optimizations:
+    - Cached count_documents() results (counts change infrequently)
+    - Cached full response (5 min TTL)
+    - Single MongoDB query for all replies (not N queries)
     """
     
-    cache_key = f"comments:{model_id}"
+    cache_key = f"comments:{model_id}:page:{page}:limit:{limit}"
+    count_cache_key = f"comments:count:{model_id}"
     
-    # Try cache first
-    cached = cache.get(cache_key)
-    if cached:
-        all_comments = json.loads(cached)
+    # Try cache first (fail-open: if cache fails, just query DB)
+    cached_result = None
+    try:
+        if cache:
+            cached = cache.get(cache_key)
+            if cached:
+                cached_result = json.loads(cached)
+    except Exception:
+        pass  # Cache miss or error, continue to DB query
+    
+    if cached_result is not None:
+        return cached_result
+    
+    # Fetch creator once for all comments (cached internally)
+    creator_id = get_model_creator(model_id)
+    
+    # Get total count of top-level comments (for pagination metadata)
+    # Cache count separately - counts change less frequently than comments
+    total_top_level = None
+    try:
+        if cache:
+            cached_count = cache.get(count_cache_key)
+            if cached_count:
+                total_top_level = int(cached_count)
+    except Exception:
+        pass  # Cache miss, will query DB
+    
+    if total_top_level is None:
+        # Cache miss - query MongoDB (use index on modelId + parentId)
+        total_top_level = comments_collection.count_documents({
+            "modelId": model_id,
+            "parentId": None
+        })
+        # Cache count for 10 minutes (counts change less frequently than comments)
+        try:
+            if cache:
+                cache.setex(count_cache_key, 600, str(total_top_level))
+        except Exception:
+            pass  # Cache write failed, but we have the data
+    
+    # Paginate at database level: get top-level comments for this page
+    skip = (page - 1) * limit
+    top_level_cursor = (
+        comments_collection
+        .find({"modelId": model_id, "parentId": None})
+        .sort("createdAt", -1)
+        .skip(skip)
+        .limit(limit)
+    )
+    top_level_comments = [doc_to_response(doc, creator_id) for doc in top_level_cursor]
+    
+    # Get all replies for these top-level comments (optimized: single query + in-memory filtering)
+    # Instead of recursive queries (N queries where N = depth), fetch all replies once and filter
+    # This is much faster for deep comment trees
+    if top_level_comments:
+        top_level_ids = [str(comment["id"]) for comment in top_level_comments]
+        
+        # Single query: Get ALL replies for this model (non-top-level comments)
+        # Then filter in-memory to only those that are descendants of our top-level comments
+        all_replies_cursor = comments_collection.find({
+            "modelId": model_id,
+            "parentId": {"$ne": None}  # All replies (non-top-level comments)
+        })
+        
+        # Build set of valid parent IDs (starts with top-level, grows as we find replies)
+        valid_parent_ids = set(top_level_ids)
+        replies_in_tree = []
+        
+        # First pass: collect all replies
+        all_replies_docs = list(all_replies_cursor)
+        
+        # Second pass: filter to only replies in our tree (iterative approach)
+        # Keep iterating until no new replies are found (handles arbitrary depth)
+        changed = True
+        while changed:
+            changed = False
+            for reply_doc in all_replies_docs:
+                reply_id = str(reply_doc["_id"])
+                reply_parent_id = str(reply_doc.get("parentId", ""))
+                
+                # If this reply's parent is in the tree, add this reply to the tree
+                if reply_parent_id in valid_parent_ids and reply_id not in valid_parent_ids:
+                    replies_in_tree.append(reply_doc)
+                    valid_parent_ids.add(reply_id)
+                    changed = True
+        
+        # Convert to response format
+        replies = [doc_to_response(doc, creator_id) for doc in replies_in_tree]
+        
+        # Combine top-level and replies, then build tree
+        all_comments = top_level_comments + replies
+        paginated_tree = build_tree(all_comments)
     else:
-        # Fetch creator once for all comments
-        creator_id = get_model_creator(model_id)
-        
-        # Cache miss --> query DB
-        cursor = comments_collection.find({"modelId": model_id}).sort("createdAt", -1)
-        comments: list[dict] = [doc_to_response(doc, creator_id) for doc in cursor]
-        
-        # Build tree
-        all_comments = build_tree(comments)
-        
-        # Cache for 5 min
-        cache.setex(cache_key, 300, json.dumps(all_comments))
+        paginated_tree = []
     
-    
-    # Pagination (only on top-level comments)
-    start = (page - 1) * limit
-    end = start + limit
-    paginated = all_comments[start:end]
-    total = len(all_comments)
-    
-    return {
-        "data": paginated,
+    result = {
+        "data": paginated_tree,
         "pagination": {
             "page": page,
             "limit": limit,
-            "total": total,
-            "hasMore": end < total
+            "total": total_top_level,
+            "hasMore": skip + limit < total_top_level
         }
     }
+    
+    # Cache for 5 min (fail-open: if cache fails, just continue)
+    try:
+        if cache:
+            cache.setex(cache_key, 300, json.dumps(result))
+            # Also invalidate count cache when comments change (handled in create/update/delete)
+    except Exception:
+        pass  # Cache write failed, but we have the data
+    
+    return result
 
 
 
@@ -175,8 +375,19 @@ def update_comment(comment_id: str, update: CommentUpdate):
             }
         )
         
-        # Invalidate cache
-        cache.delete(f"comments:{comment['modelId']}")
+        # Invalidate cache (all pages and count)
+        try:
+            if cache:
+                model_id = comment['modelId']
+                cache.delete(f"comments:count:{model_id}")
+                # Delete common page patterns
+                for page in range(1, 11):
+                    try:
+                        cache.delete(f"comments:{model_id}:page:{page}:limit:50")
+                    except:
+                        pass
+        except Exception:
+            pass  # Fail-open: cache failures don't break the service
         
     except HTTPException:
         raise
@@ -231,8 +442,18 @@ def delete_comment(comment_id: str):
                 "_id": {"$in": [ObjectId(id) for id in all_descendants]}
             })
         
-        # Invalidate cache
-        cache.delete(f"comments:{model_id}")
+        # Invalidate cache (all pages and count)
+        try:
+            if cache:
+                cache.delete(f"comments:count:{model_id}")
+                # Delete common page patterns
+                for page in range(1, 11):
+                    try:
+                        cache.delete(f"comments:{model_id}:page:{page}:limit:50")
+                    except:
+                        pass
+        except Exception:
+            pass  # Fail-open: cache failures don't break the service
         
     except HTTPException:
         raise

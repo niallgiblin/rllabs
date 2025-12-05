@@ -21,23 +21,60 @@ spec:
           env:
             - name: SECRET_KEY
               value: "change-me-in-production"
+            # Observability Configuration
+            - name: OTEL_SERVICE_NAME
+              value: "api-gateway"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://jaeger:4317"
+            - name: TRACING_ENABLED
+              value: "true"
+            - name: LOG_LEVEL
+              value: "INFO"
+            # Redis Configuration (HA-aware)
+            # Direct connection (fallback if Sentinel not configured)
             - name: REDIS_HOST
               value: "redis"
             - name: REDIS_PORT
               value: "6379"
+            # Redis Sentinel Configuration (for automatic failover)
+            # Format: "host1:port1,host2:port2,host3:port3"
+            # If set, uses Sentinel for automatic failover
+            # Falls back to direct connection if not set (backward compatible)
+            - name: REDIS_SENTINEL_HOSTS
+              value: "redis-sentinel-0.redis-sentinel:26379,redis-sentinel-1.redis-sentinel:26379,redis-sentinel-2.redis-sentinel:26379"
+            - name: REDIS_SENTINEL_MASTER_NAME
+              value: "mymaster"
+            - name: REDIS_PASSWORD
+              value: "redis_password"
             # Service URLs for routing (consistent with Docker Compose and Kubernetes)
             # Note: These are informational - actual routing uses config.py SERVICES dict
             - name: UPLOAD_DOWNLOAD_SERVICE_URL
               value: "http://upload-download-service:8002"
             - name: MODEL_CATALOG_SERVICE_URL
               value: "http://model-catalog-service:8000"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 15        # Reduced frequency
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 30        # Reduced frequency
+            timeoutSeconds: 3
+            failureThreshold: 3
           resources:
             requests:
-              cpu: "100m"
-              memory: "128Mi"
-            limits:
-              cpu: "200m"
+              cpu: "250m"  # Increased from 100m to prevent CPU throttling
               memory: "256Mi"
+            limits:
+              cpu: "1000m"  # Increased from 500m (2x requests minimum)
+              memory: "512Mi"
 ---
 apiVersion: v1
 kind: Service

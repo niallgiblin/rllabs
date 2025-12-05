@@ -1,0 +1,47 @@
+---
+# Ingress for MinIO API (port 9000)
+# Allows external access to MinIO for presigned URL uploads/downloads
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: minio-ingress
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "500m"  # Large file uploads
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"  # Important for streaming uploads
+    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"  # Disable request buffering for uploads
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: minio.localhost  # Use localhost subdomain for local testing
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: minio
+                port:
+                  number: 9000
+---
+# Ingress for MinIO Console (port 9001) - optional
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: minio-console-ingress
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: minio-console.localhost
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: minio
+                port:
+                  number: 9001
+

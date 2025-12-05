@@ -65,7 +65,31 @@ class EventPublisher:
         Lazy connection - only connects when first event is published.
         Connection is reused for subsequent events.
         """
-        if self._connection is None or self._connection.is_closed:
+        # Check if connection is closed (handle pika internal errors)
+        connection_closed = False
+        if self._connection is not None:
+            try:
+                connection_closed = self._connection.is_closed
+            except (IndexError, AttributeError) as e:
+                # Handle pika internal deque errors
+                logger.debug(f"Pika connection state check error (likely deque issue): {e}")
+                connection_closed = True
+            except Exception as e:
+                logger.debug(f"Error checking connection state: {e}")
+                connection_closed = True
+        
+        if self._connection is None or connection_closed:
+            # Clean up old connection state safely
+            if self._connection is not None:
+                try:
+                    if not self._connection.is_closed:
+                        self._connection.close()
+                except (IndexError, AttributeError):
+                    # Ignore pika internal deque errors during cleanup
+                    pass
+                except Exception:
+                    pass
+            
             try:
                 credentials = pika.PlainCredentials(self.username, self.password)
                 parameters = pika.ConnectionParameters(
@@ -203,9 +227,16 @@ class EventPublisher:
         
         Called on application shutdown.
         """
-        if self._connection and not self._connection.is_closed:
-            self._connection.close()
-            logger.info("Closed RabbitMQ connection")
+        if self._connection:
+            try:
+                if not self._connection.is_closed:
+                    self._connection.close()
+                    logger.info("Closed RabbitMQ connection")
+            except (IndexError, AttributeError) as e:
+                # Handle pika internal deque errors during cleanup
+                logger.debug(f"Ignoring pika cleanup error (likely deque issue): {e}")
+            except Exception as e:
+                logger.debug(f"Error closing connection: {e}")
 
     def publish_training_job(self, message: dict):
         """

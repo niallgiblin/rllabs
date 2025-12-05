@@ -1,0 +1,50 @@
+# MongoDB Exporter for Prometheus Monitoring
+# Exposes metrics for replica set status, replication lag, and MongoDB health
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mongodb-exporter
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mongodb-exporter
+  template:
+    metadata:
+      labels:
+        app: mongodb-exporter
+    spec:
+      containers:
+        - name: mongodb-exporter
+          image: percona/mongodb_exporter:0.39.0
+          ports:
+            - containerPort: 9216
+              name: metrics
+          env:
+            # MongoDB connection string (replica set)
+            - name: MONGODB_URI
+              value: "mongodb://rllabs:rllabs_password@mongodb-0.mongodb:27017,mongodb-1.mongodb:27017,mongodb-2.mongodb:27017/collaboration_db?replicaSet=rs0&authSource=admin"
+            # Enable replica set metrics
+            - name: MONGODB_EXPORTER_DISABLED_COLLECTORS
+              value: ""
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "100m"
+              memory: "128Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongodb-exporter
+spec:
+  selector:
+    app: mongodb-exporter
+  ports:
+    - protocol: TCP
+      port: 9216
+      targetPort: 9216
+

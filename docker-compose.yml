@@ -119,6 +119,10 @@ services:
       POSTGRES_PASSWORD: rllabs_password
       POSTGRES_DB: model_catalog_db
       POSTGRES_MULTIPLE_DATABASES: upload_download_db
+      # CRITICAL: Increase max_connections to handle connection pools from multiple services
+      # With connection pools of 40 per pod, we need at least 300 connections
+      # to account for multiple pods, read replicas, and system overhead
+      POSTGRES_MAX_CONNECTIONS: "300"
     ports:
       - "5432:5432"
     volumes:

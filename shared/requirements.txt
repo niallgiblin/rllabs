@@ -1,0 +1,24 @@
+# Shared Observability Dependencies
+# ==================================
+# Add these to each service's requirements.txt
+
+# Structured JSON logging
+python-json-logger>=2.0.7
+
+# OpenTelemetry Core
+opentelemetry-api>=1.21.0
+opentelemetry-sdk>=1.21.0
+
+# OpenTelemetry Exporters (for Jaeger)
+opentelemetry-exporter-otlp>=1.21.0
+
+# OpenTelemetry Auto-Instrumentation
+opentelemetry-instrumentation-fastapi>=0.42b0
+opentelemetry-instrumentation-httpx>=0.42b0
+opentelemetry-instrumentation-sqlalchemy>=0.42b0
+opentelemetry-instrumentation-redis>=0.42b0
+opentelemetry-instrumentation-pika>=0.42b0
+
+# Context propagation
+opentelemetry-propagator-b3>=1.21.0
+

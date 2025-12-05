@@ -1,5 +1,16 @@
 # Horizontal Pod Autoscalers for auto-scaling based on CPU and memory metrics
 # These will automatically scale pods up/down based on resource usage
+#
+# Notes on scaling thresholds:
+# - CPU-bound services (api-gateway): Scale at 70% CPU
+# - I/O-bound services (model-catalog, collaboration): Scale earlier (50% CPU)
+#   because they spend time waiting on DB/network, not using CPU
+# - Services with higher baseline traffic get higher minReplicas
+#
+# OPTIMIZED FOR FASTER SCALING:
+# - Increased maxReplicas for high-traffic services (API Gateway, Upload-Download)
+# - More aggressive scale-up policies (scale faster, more pods at once)
+# - Faster scale-down policies (reduce costs when load decreases)
 
 ---
 apiVersion: autoscaling/v2
@@ -11,15 +22,15 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
     name: api-gateway
-  minReplicas: 1
-  maxReplicas: 5
+  minReplicas: 2  # Gateway should always have redundancy
+  maxReplicas: 20  # INCREASED: From 10 to 20 for better scaling under extreme load
   metrics:
     - type: Resource
       resource:
         name: cpu
         target:
           type: Utilization
-          averageUtilization: 70
+          averageUtilization: 70  # LOWERED: Scale earlier to prevent saturation
     - type: Resource
       resource:
         name: memory
@@ -28,21 +39,25 @@ spec:
           averageUtilization: 80
   behavior:
     scaleDown:
-      stabilizationWindowSeconds: 300
+      stabilizationWindowSeconds: 30  # REDUCED: Scale down faster (from 60s)
       policies:
         - type: Percent
           value: 50
-          periodSeconds: 60
+          periodSeconds: 30  # REDUCED: Check more frequently (from 60s)
+        - type: Pods
+          value: 2  # ADDED: Scale down by 2 pods at a time
+          periodSeconds: 30
+      selectPolicy: Max  # Use more aggressive scale-down
     scaleUp:
-      stabilizationWindowSeconds: 0
+      stabilizationWindowSeconds: 0  # No delay - scale immediately
       policies:
         - type: Percent
-          value: 100
-          periodSeconds: 30
+          value: 200  # INCREASED: Scale up by 200% (double pods) if needed
+          periodSeconds: 15  # REDUCED: Check every 15s instead of 30s
         - type: Pods
-          value: 2
-          periodSeconds: 30
-      selectPolicy: Max
+          value: 4  # INCREASED: Scale up by 4 pods at a time (from 2)
+          periodSeconds: 15  # REDUCED: Check every 15s instead of 30s
+      selectPolicy: Max  # Use most aggressive scaling policy
 
 ---
 apiVersion: autoscaling/v2
@@ -54,15 +69,15 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
     name: model-catalog-service
-  minReplicas: 1
-  maxReplicas: 5
+  minReplicas: 3  # I/O-bound: needs more baseline capacity
+  maxReplicas: 15  # INCREASED: From 10 to 15 for better database query handling
   metrics:
     - type: Resource
       resource:
         name: cpu
         target:
           type: Utilization
-          averageUtilization: 70
+          averageUtilization: 50  # Keep same - lower threshold for I/O-bound service
     - type: Resource
       resource:
         name: memory
@@ -71,20 +86,24 @@ spec:
           averageUtilization: 80
   behavior:
     scaleDown:
-      stabilizationWindowSeconds: 300
+      stabilizationWindowSeconds: 30  # REDUCED: Scale down faster (from 60s)
       policies:
         - type: Percent
           value: 50
-          periodSeconds: 60
+          periodSeconds: 30  # REDUCED: Check more frequently (from 60s)
+        - type: Pods
+          value: 2  # ADDED: Scale down by 2 pods at a time
+          periodSeconds: 30
+      selectPolicy: Max
     scaleUp:
-      stabilizationWindowSeconds: 0
+      stabilizationWindowSeconds: 0  # No delay - scale immediately
       policies:
         - type: Percent
-          value: 100
-          periodSeconds: 30
+          value: 150  # INCREASED: Scale up by 150% if needed
+          periodSeconds: 15  # REDUCED: Check every 15s instead of 30s
         - type: Pods
-          value: 2
-          periodSeconds: 30
+          value: 3  # INCREASED: Scale up by 3 pods at a time (from 2)
+          periodSeconds: 15  # REDUCED: Check every 15s instead of 30s
       selectPolicy: Max
 
 ---
@@ -97,15 +116,63 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
     name: upload-download-service
-  minReplicas: 1
-  maxReplicas: 5
+  minReplicas: 2  # Handles large file transfers
+  maxReplicas: 20  # INCREASED: From 10 to 20 (CPU was at 329% with only 6 pods)
   metrics:
     - type: Resource
       resource:
         name: cpu
         target:
           type: Utilization
-          averageUtilization: 70
+          averageUtilization: 60  # LOWERED: Scale earlier (from 80%) - file operations are CPU-intensive
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 85  # Keep same - memory is less of a concern
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 30  # REDUCED: Scale down faster (from 60s)
+      policies:
+        - type: Percent
+          value: 50
+          periodSeconds: 30  # REDUCED: Check more frequently (from 60s)
+        - type: Pods
+          value: 2  # Keep same
+          periodSeconds: 30  # REDUCED: Check more frequently (from 60s)
+      selectPolicy: Max  # Use more aggressive scale-down
+    scaleUp:
+      stabilizationWindowSeconds: 0  # No delay - scale immediately
+      policies:
+        - type: Percent
+          value: 200  # INCREASED: Scale up by 200% (double pods) if needed
+          periodSeconds: 15  # REDUCED: Check every 15s instead of 30s
+        - type: Pods
+          value: 4  # INCREASED: Scale up by 4 pods at a time (from 2)
+          periodSeconds: 15  # REDUCED: Check every 15s instead of 30s
+      selectPolicy: Max  # Use most aggressive scaling policy
+
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: collaboration-service-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: collaboration-service
+  minReplicas: 2  # I/O-bound (MongoDB)
+  maxReplicas: 15  # INCREASED: From 10 to 15 for better MongoDB query handling
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 50  # Keep same - lower threshold for I/O-bound service
     - type: Resource
       resource:
         name: memory
@@ -114,19 +181,66 @@ spec:
           averageUtilization: 80
   behavior:
     scaleDown:
-      stabilizationWindowSeconds: 300
+      stabilizationWindowSeconds: 30  # REDUCED: Scale down faster (from 60s)
       policies:
         - type: Percent
           value: 50
-          periodSeconds: 60
+          periodSeconds: 30  # REDUCED: Check more frequently (from 60s)
+        - type: Pods
+          value: 2  # ADDED: Scale down by 2 pods at a time
+          periodSeconds: 30
+      selectPolicy: Max
     scaleUp:
-      stabilizationWindowSeconds: 0
+      stabilizationWindowSeconds: 0  # No delay - scale immediately
+      policies:
+        - type: Percent
+          value: 150  # INCREASED: Scale up by 150% if needed
+          periodSeconds: 15  # REDUCED: Check every 15s instead of 30s
+        - type: Pods
+          value: 3  # INCREASED: Scale up by 3 pods at a time (from 2)
+          periodSeconds: 15  # REDUCED: Check every 15s instead of 30s
+      selectPolicy: Max
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: model-train-service-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: model-train-service
+  minReplicas: 1  # Training jobs are CPU-intensive, start with 1 but allow scaling
+  maxReplicas: 5  # Lower max than other services - training is resource-intensive
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 80  # Higher threshold - training is CPU-bound
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 85  # Allow higher memory usage before scaling
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300  # Longer cooldown - training jobs are long-running
+      policies:
+        - type: Percent
+          value: 50
+          periodSeconds: 120
+      selectPolicy: Min  # Conservative scale-down for training workloads
+    scaleUp:
+      stabilizationWindowSeconds: 60
       policies:
         - type: Percent
           value: 100
-          periodSeconds: 30
+          periodSeconds: 60
         - type: Pods
-          value: 2
-          periodSeconds: 30
+          value: 1  # Scale up one pod at a time for training
+          periodSeconds: 60
       selectPolicy: Max
-

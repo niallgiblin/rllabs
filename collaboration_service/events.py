@@ -3,55 +3,113 @@ import json
 from datetime import datetime
 from database import db, cache, models_collection
 import os
+import threading
+
+# Global RabbitMQ connection and channel (reused across requests)
+_rabbitmq_connection = None
+_rabbitmq_channel = None
+_rabbitmq_lock = threading.Lock()
 
 def get_rabbitmq_connection():
     """
-    Get RabbitMQ connection using environment variables
+    Get or create RabbitMQ connection (singleton pattern - reuse connection)
+    Thread-safe connection reuse to avoid creating new connections for every event
     """
-    rabbitmq_host = os.getenv("RABBITMQ_HOST", "rabbitmq")
-    rabbitmq_port = int(os.getenv("RABBITMQ_PORT", "5672"))
-    rabbitmq_user = os.getenv("RABBITMQ_USER", "admin")
-    rabbitmq_pass = os.getenv("RABBITMQ_PASS", "admin_password")
+    global _rabbitmq_connection, _rabbitmq_channel
     
-    credentials = pika.PlainCredentials(rabbitmq_user, rabbitmq_pass)
-    connection = pika.BlockingConnection(
-        pika.ConnectionParameters(
-            host=rabbitmq_host,
-            port=rabbitmq_port,
-            credentials=credentials
-        )
-    )
-    
-    return connection
+    with _rabbitmq_lock:
+        # Check if connection is closed (handle pika internal errors)
+        connection_closed = False
+        if _rabbitmq_connection is not None:
+            try:
+                connection_closed = _rabbitmq_connection.is_closed
+            except (IndexError, AttributeError) as e:
+                # Handle pika internal deque errors
+                print(f"⚠️  Pika connection state check error (likely deque issue): {e}")
+                connection_closed = True
+            except Exception as e:
+                print(f"⚠️  Error checking connection state: {e}")
+                connection_closed = True
+        
+        if _rabbitmq_connection is None or connection_closed:
+            # Clean up old connection state safely
+            if _rabbitmq_connection is not None:
+                try:
+                    if not _rabbitmq_connection.is_closed:
+                        _rabbitmq_connection.close()
+                except (IndexError, AttributeError):
+                    # Ignore pika internal deque errors during cleanup
+                    pass
+                except Exception:
+                    pass
+            
+            try:
+                rabbitmq_host = os.getenv("RABBITMQ_HOST", "rabbitmq")
+                rabbitmq_port = int(os.getenv("RABBITMQ_PORT", "5672"))
+                rabbitmq_user = os.getenv("RABBITMQ_USER", "admin")
+                rabbitmq_pass = os.getenv("RABBITMQ_PASS", "admin_password")
+                
+                credentials = pika.PlainCredentials(rabbitmq_user, rabbitmq_pass)
+                _rabbitmq_connection = pika.BlockingConnection(
+                    pika.ConnectionParameters(
+                        host=rabbitmq_host,
+                        port=rabbitmq_port,
+                        credentials=credentials,
+                        heartbeat=600,
+                        blocked_connection_timeout=300,
+                        connection_attempts=3,  # Retry up to 3 times
+                        retry_delay=2,  # 2 seconds between retries
+                        socket_timeout=5  # 5 second timeout per attempt
+                    )
+                )
+                _rabbitmq_channel = _rabbitmq_connection.channel()
+                
+                # Declare exchange once (idempotent)
+                _rabbitmq_channel.exchange_declare(exchange='comments', exchange_type='topic', durable=True)
+                
+                print("✅ RabbitMQ connection established (reused)")
+            except Exception as e:
+                print(f"⚠️  Failed to connect to RabbitMQ: {e}")
+                _rabbitmq_connection = None
+                _rabbitmq_channel = None
+        
+        return _rabbitmq_connection, _rabbitmq_channel
 
 
 
 
 def publish_comment_created(comment_data: dict):
     """
-    Publish CommentCreated event
+    Publish CommentCreated event (non-blocking, reuses connection)
+    Uses singleton connection pattern to avoid creating new connections for every event
     """
-    
-    connection = get_rabbitmq_connection()
-    channel = connection.channel()
-    
-    # Declare exchange for comment events
-    channel.exchange_declare(exchange='comments', exchange_type='topic', durable=True)
-    
-    event = {
-        "eventType": "CommentCreated",
-        "timestamp": datetime.utcnow().isoformat(),
-        "data": comment_data
-    }
-    
-    channel.basic_publish(
-        exchange='comments',
-        routing_key='comment.created',
-        body=json.dumps(event)
-    )
-    
-    connection.close()
-    print(f"✅ Published CommentCreated event for comment {comment_data.get('id')}")
+    try:
+        connection, channel = get_rabbitmq_connection()
+        
+        if connection is None or channel is None:
+            print(f"⚠️  RabbitMQ not available, skipping CommentCreated event for comment {comment_data.get('id')}")
+            return
+        
+        event = {
+            "eventType": "CommentCreated",
+            "timestamp": datetime.utcnow().isoformat(),
+            "data": comment_data
+        }
+        
+        channel.basic_publish(
+            exchange='comments',
+            routing_key='comment.created',
+            body=json.dumps(event),
+            properties=pika.BasicProperties(
+                delivery_mode=2,  # Make message persistent
+                content_type='application/json'
+            )
+        )
+        
+        print(f"✅ Published CommentCreated event for comment {comment_data.get('id')}")
+    except Exception as e:
+        print(f"⚠️  Failed to publish CommentCreated event: {e}")
+        # Fail-open: don't block request if event publishing fails
 
 
 
@@ -78,7 +136,11 @@ def handle_model_deleted(ch, method, properties, body):
     )
     
     # Invalidate cache
-    cache.delete(f"comments:{model_id}")
+    try:
+        if cache:
+            cache.delete(f"comments:{model_id}")
+    except Exception:
+        pass  # Fail-open: cache failures don't break the service
     
     print(f"✅ Archived {result.modified_count} comments for deleted model {model_id}")
     ch.basic_ack(delivery_tag=method.delivery_tag)

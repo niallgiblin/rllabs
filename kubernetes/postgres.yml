@@ -62,6 +62,12 @@ spec:
               value: "model_catalog_db"
             - name: POSTGRES_MULTIPLE_DATABASES
               value: "upload_download_db"
+            # CRITICAL: Increase max_connections to handle connection pools from multiple pods
+            # With 3 model-catalog pods (40 connections each) + 3 upload-download pods (40 each) = 240 connections
+            # Plus overhead for read replicas, other services, and system connections
+            # Set to 300 to provide headroom for growth and read replicas
+            - name: POSTGRES_MAX_CONNECTIONS
+              value: "300"
           ports:
             - containerPort: 5432
           volumeMounts:

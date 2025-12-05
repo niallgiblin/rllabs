@@ -17,6 +17,21 @@ spec:
           image: redis:7-alpine
           ports:
             - containerPort: 6379
+          # Redis configuration for better performance under load
+          command:
+            - redis-server
+            - --maxclients
+            - "10000"  # Increased from default 10000 to handle more connections
+            - --timeout
+            - "300"  # 5 minute timeout for idle connections
+            - --tcp-keepalive
+            - "60"  # Keep connections alive
+            - --tcp-backlog
+            - "511"  # Connection queue size
+            - --maxmemory
+            - "200mb"  # 80% of 256Mi memory limit
+            - --maxmemory-policy
+            - "allkeys-lru"  # Evict least recently used keys when memory full
           readinessProbe:
             exec:
               command:
@@ -28,11 +43,11 @@ spec:
             failureThreshold: 5
           resources:
             requests:
-              cpu: "100m"
-              memory: "128Mi"
+              cpu: "200m"  # Increased from 100m
+              memory: "256Mi"  # Increased from 128Mi
             limits:
-              cpu: "200m"
-              memory: "256Mi"
+              cpu: "500m"  # Increased from 200m
+              memory: "512Mi"  # Increased from 256Mi
 ---
 apiVersion: v1
 kind: Service

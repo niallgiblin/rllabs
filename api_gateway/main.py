@@ -1,10 +1,48 @@
+"""
+API Gateway - Main Application
+==============================
+Central entry point for all API requests with authentication, rate limiting, and routing.
+"""
+
+# =============================================================================
+# OBSERVABILITY SETUP (must be first, before other imports)
+# =============================================================================
+import os
+import sys
+
+# Add shared module to path
+shared_path = os.path.join(os.path.dirname(__file__), 'shared')
+if os.path.exists(shared_path) and shared_path not in sys.path:
+    sys.path.insert(0, shared_path)
+
+SERVICE_NAME = os.getenv("OTEL_SERVICE_NAME", "api-gateway")
+
+# Initialize structured logging and tracing
+try:
+    from observability import setup_logging, setup_tracing, get_logger
+    
+    # Use JSON logging in Kubernetes
+    json_output = os.getenv("KUBERNETES_SERVICE_HOST") is not None
+    setup_logging(service_name=SERVICE_NAME, json_output=json_output)
+    setup_tracing(service_name=SERVICE_NAME)
+    logger = get_logger(__name__)
+except ImportError:
+    import logging
+    logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger(__name__)
+    logger.warning("Observability module not available, using basic logging")
+
+# =============================================================================
+# APPLICATION IMPORTS
+# =============================================================================
 from fastapi import FastAPI, Request, HTTPException, status, Depends, APIRouter
 from fastapi.responses import Response, RedirectResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-import logging
 import time
+import asyncio
+import logging
 from typing import Dict, Any, Optional
 from contextlib import asynccontextmanager
 
@@ -82,10 +120,6 @@ internal_router = APIRouter()
 async def internal_health():
     return {"status": "internal service healthy"}
 
-# Setup logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
 # Application Lifespan
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -96,6 +130,18 @@ async def lifespan(app: FastAPI):
     
     yield
     
+    # Cleanup: close shared HTTP client connection pool
+    from proxy import close_http_client
+    await close_http_client()
+    logger.info("HTTP client pool closed")
+    
+    # Cleanup: close Redis client
+    try:
+        from rate_limiter import close_redis_client
+        await close_redis_client()
+        logger.info("Redis client closed")
+    except Exception as e:
+        logger.warning(f"Error closing Redis client: {e}")
     
     logger.info("API Gateway shutting down...")
 
@@ -106,6 +152,12 @@ app = FastAPI(
     description="Enhanced API Gateway with Rate Limiting",
     lifespan=lifespan
 )
+
+# Register health endpoint BEFORE Instrumentator so it can be excluded
+@app.get("/health", include_in_schema=False)
+async def health():
+    """Lightweight health check for Kubernetes probes"""
+    return {"status": "ok"}
 
 # Add Prometheus metrics
 try:
@@ -118,11 +170,6 @@ except ImportError:
 
 # Include routers
 app.include_router(internal_router, prefix="/internal", tags=["internal"])
-
-# Basic health endpoint
-@app.get("/health")
-async def health():
-    return {"status": "ok"}
 
 
 # Try to mount static files
@@ -145,10 +192,46 @@ app.add_middleware(
 # Custom Middleware
 @app.middleware("http")
 async def add_security_headers(request: Request, call_next):
-    """Add security headers to all responses"""
+    """Add security headers to all responses with request timeout"""
     start_time = time.time()
     
-    response = await call_next(request)
+    # Dynamic timeout based on endpoint type
+    # Downloads and uploads need more time (MinIO operations)
+    # Health checks and metrics should be fast
+    path = request.url.path
+    if path in ["/health", "/internal/health"]:
+        timeout = 1.0  # Health checks should be fast
+    elif path == "/metrics":
+        timeout = 5.0  # Metrics can take longer (Prometheus scraping)
+    elif path.startswith("/api/uploads") and request.method == "POST":
+        # Separate timeouts for upload operations
+        if "/complete" in path:
+            timeout = 60.0  # Complete operations need more time (multipart finalization)
+        else:
+            timeout = 45.0  # Initiate upload (presigned URL generation)
+    elif "/downloads/" in path:
+        timeout = 30.0  # Downloads should be fast (presigned URL only)
+    elif "/training-jobs" in path:
+        timeout = 15.0  # Reduced: job should queue quickly, not wait for validation
+    elif path.startswith("/api/models") and request.method == "GET":
+        # Model catalog endpoints need more time for database queries and serialization
+        # GET /api/models (list): 30s for large datasets
+        # GET /api/models/{id}: 30s (covers individual model, versions, latest endpoints)
+        timeout = 30.0  # Increased from 10.0s - allows time for slow queries with many models/versions
+    else:
+        timeout = 10.0  # Default: 10 seconds
+    
+    try:
+        response = await asyncio.wait_for(
+            call_next(request),
+            timeout=timeout
+        )
+    except asyncio.TimeoutError:
+        logger.warning(f"{request.method} {request.url.path} - Request timeout (>{timeout}s)")
+        return JSONResponse(
+            status_code=504,
+            content={"error": "Request timeout", "detail": f"Request took longer than {timeout} seconds"}
+        )
     
     # Security headers
     response.headers["X-Content-Type-Options"] = "nosniff"
@@ -160,8 +243,9 @@ async def add_security_headers(request: Request, call_next):
     process_time = time.time() - start_time
     response.headers["X-Process-Time"] = str(process_time)
     
-    # Log request
-    logger.info(f"{request.method} {request.url.path} - {response.status_code} - {process_time:.3f}s")
+    # Log request (only if slow, exclude health/metrics to reduce noise)
+    if process_time > 0.5 and request.url.path not in ["/health", "/metrics", "/internal/health"]:
+        logger.info(f"{request.method} {request.url.path} - {response.status_code} - {process_time:.3f}s")
     
     return response
 
@@ -468,17 +552,37 @@ async def proxy_to_service(
         scope = ""
     
     # Check rate limit (by user_id if authenticated, by IP if not)
-    endpoint = f"/{path.split('/')[0]}" if path else "/"
+    # Async rate limiter with timeout to prevent Redis from blocking request processing
+    # Use full path for more granular rate limiting (per-endpoint instead of per-service)
+    # This prevents one endpoint from affecting others and allows better load distribution
+    endpoint = full_path  # Use full path for better granularity
     rate_limit_key = user_id if user_id else f"ip:{client_id}"
-    check_rate_limit(rate_limit_key, endpoint)
+    try:
+        # Async rate limiter with timeout - fail open if Redis slow
+        await asyncio.wait_for(
+            check_rate_limit(rate_limit_key, endpoint),
+            timeout=0.05  # 50ms max - reduced since async is faster
+        )
+    except asyncio.TimeoutError:
+        # Only log at debug level (reduce production noise)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"Rate limiter timeout for {rate_limit_key} - allowing request")
+        # Fail open: allow request to proceed
+    except RateLimitExceeded:
+        # Re-raise rate limit exceptions (these should return 429)
+        raise
+    except Exception as e:
+        # Only log at debug level (reduce production noise)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"Rate limiter error (allowing request): {e}")
+        # Continue processing - rate limiter has fail-open semantics
     
-    # Determine target service
-    full_path = f"/api/{path}"
-    logger.info(f"[ROUTING] Looking up service for path: '{full_path}' (original path param: '{path}')")
-    
+    # Determine target service (only log errors to reduce noise)
     try:
         target_service = get_target_service(full_path)
-        logger.info(f"[ROUTING] Service lookup result for '{full_path}': {target_service}")
+        # Only log routing at debug level (too verbose for production)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"[ROUTING] Service lookup for '{full_path}': {target_service}")
     except Exception as e:
         logger.error(f"[ROUTING] Error in get_target_service: {e}", exc_info=True)
         target_service = None
@@ -491,12 +595,14 @@ async def proxy_to_service(
             detail="Service not found"
         )
     
-    # Log request with auth status for monitoring
-    auth_status = "authenticated" if user_id else "anonymous"
-    auth_status_detail = f"User {user_id}" if user_id else f"Anonymous (IP: {client_id})"
-    logger.info(
-        f"[{auth_status.upper()}] {auth_status_detail} -> {request.method} {full_path} -> {target_service}"
-    )
+    # Log request with auth status for monitoring (only if slow or error)
+    # Reduced verbosity: only log at debug level for normal requests
+    if logger.isEnabledFor(logging.DEBUG):
+        auth_status = "authenticated" if user_id else "anonymous"
+        auth_status_detail = f"User {user_id}" if user_id else f"Anonymous (IP: {client_id})"
+        logger.debug(
+            f"[{auth_status.upper()}] {auth_status_detail} -> {request.method} {full_path} -> {target_service}"
+        )
     
     try:
         # Prepare headers
@@ -524,6 +630,19 @@ async def proxy_to_service(
             user_id=user_id,
             extra_headers=extra_headers
         )
+        
+        # Log 5xx responses for debugging
+        if response.status_code >= 500:
+            logger.error(
+                f"Backend {target_service} returned {response.status_code} for {request.method} {full_path}",
+                extra={
+                    "status_code": response.status_code,
+                    "method": request.method,
+                    "path": full_path,
+                    "target_service": target_service,
+                    "response_preview": (response.text[:200] if hasattr(response, 'text') else None)
+                }
+            )
         
         # Return response
         content_bytes = getattr(response, "content", None)
@@ -566,8 +685,24 @@ async def public_proxy(request: Request, path: str):
         )
     
     # Check rate limit for public endpoints by IP
+    # Async rate limiter with timeout to prevent Redis from blocking request processing
     client_ip = request.client.host if request.client else "unknown"
-    check_rate_limit(f"ip:{client_ip}", f"/public/{path}")
+    try:
+        # Async rate limiter with timeout - fail open if Redis slow
+        await asyncio.wait_for(
+            check_rate_limit(f"ip:{client_ip}", f"/public/{path}"),
+            timeout=0.05  # 50ms max - reduced since async is faster
+        )
+    except asyncio.TimeoutError:
+        logger.debug(f"Rate limiter timeout for ip:{client_ip} - allowing request")
+        # Fail open: allow request to proceed
+    except RateLimitExceeded:
+        # Re-raise rate limit exceptions (these should return 429)
+        raise
+    except Exception as e:
+        # Log but don't block requests on Redis errors - fail open
+        logger.debug(f"Rate limiter error (allowing request): {e}")
+        # Continue processing - rate limiter has fail-open semantics
     
     logger.info(f"Public request from {client_ip} -> {request.method} {full_path} -> {target_service}")
     

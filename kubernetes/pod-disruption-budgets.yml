@@ -1,0 +1,62 @@
+# PodDisruptionBudgets ensure minimum availability during voluntary disruptions
+# (node maintenance, cluster upgrades, etc.)
+#
+# This demonstrates high availability practices for distributed systems
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: api-gateway-pdb
+spec:
+  minAvailable: 1  # At least 1 pod must be available
+  selector:
+    matchLabels:
+      app: api-gateway
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: model-catalog-service-pdb
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: model-catalog-service
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: upload-download-service-pdb
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: upload-download-service
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: collaboration-service-pdb
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: collaboration-service
+
+---
+# For stateful services, we use maxUnavailable instead
+# This ensures we don't lose quorum in replica sets
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: mongodb-pdb
+spec:
+  maxUnavailable: 1  # Can lose 1 pod, but not 2 (need majority for replica set)
+  selector:
+    matchLabels:
+      app: mongodb
+

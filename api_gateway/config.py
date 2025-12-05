@@ -15,6 +15,12 @@ class Settings(BaseSettings):
     REDIS_HOST: str = "redis"
     REDIS_PORT: int = 6379
     
+    # Redis Sentinel (optional, for HA)
+    # Format: "host1:port1,host2:port2,host3:port3"
+    REDIS_SENTINEL_HOSTS: str = ""
+    REDIS_SENTINEL_MASTER_NAME: str = "mymaster"
+    REDIS_PASSWORD: str = ""
+    
     # Service Registry
     # Routes are matched in order. most specific routes should come first
     SERVICES: Dict[str, str] = {
@@ -35,7 +41,9 @@ class Settings(BaseSettings):
     }
     
     # Rate Limiting
-    RATE_LIMIT_REQUESTS: int = 100
+    # Increased limits for load testing: 1000 req/min per user/IP
+    # For production, adjust based on expected traffic patterns
+    RATE_LIMIT_REQUESTS: int = 1000  # Increased from 100 for load testing
     RATE_LIMIT_WINDOW: int = 60  # seconds
     
     class Config:
