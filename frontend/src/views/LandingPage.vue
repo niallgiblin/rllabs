@@ -24,8 +24,7 @@
           </button>
           <div v-if="isAuthenticated" class="h-6 w-px bg-white/10"></div>
           <button v-if="isAuthenticated" @click="logout" class="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors">Sign Out</button>
-          <button v-if="!isAuthenticated" @click="showAuth = true" class="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors">Sign In</button>
-          <button v-if="!isAuthenticated" @click="showAuth = true" class="text-sm font-medium border border-white/10 hover:bg-white/5 px-4 py-2 rounded-lg transition-colors">Sign Up</button>
+          <button v-if="!isAuthenticated" @click="showAuth = true; isSignUp = false" class="text-sm font-medium border border-white/10 hover:bg-white/5 px-4 py-2 rounded-lg transition-colors">Sign In</button>
         </div>
       </div>
     </nav>
@@ -106,14 +105,28 @@
 
       <!-- Model Grid -->
       <div v-else-if="filteredModels.length > 0" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-        <div v-for="model in filteredModels" :key="model.id" @click="router.push(`/models/${model.id}`)" 
-             class="group relative bg-white/5 hover:bg-white/10 border border-white/10 hover:border-white/20 rounded-2xl p-6 transition-all cursor-pointer hover:-translate-y-1 duration-300">
+        <div v-for="model in filteredModels" :key="model.id" 
+             @click="router.push(`/models/${model.id}`)"
+             class="group relative bg-white/5 hover:bg-white/10 border border-white/10 hover:border-white/20 rounded-2xl p-6 transition-all hover:-translate-y-1 duration-300 cursor-pointer">
           
           <div class="flex justify-between items-start mb-4">
-            <h3 class="text-xl font-semibold group-hover:text-white transition-colors">{{ model.name }}</h3>
-            <span class="text-xs font-medium px-2.5 py-1 rounded-md bg-white/5 border border-white/10 text-muted-foreground">
-              {{ model.type }}
-            </span>
+            <h3 class="text-xl font-semibold group-hover:text-white transition-colors flex-1">{{ model.name }}</h3>
+            <div class="flex items-center gap-2">
+              <span class="text-xs font-medium px-2.5 py-1 rounded-md bg-white/5 border border-white/10 text-muted-foreground">
+                {{ model.type }}
+              </span>
+              <button 
+                v-if="isAuthenticated && (model.isOwner || currentUser?.is_admin)"
+                @click.stop="handleDeleteModel(model.id)"
+                :disabled="deletingModelId === model.id"
+                class="opacity-0 group-hover:opacity-100 transition-opacity p-1.5 hover:bg-destructive/20 rounded text-destructive hover:text-destructive/80 disabled:opacity-50"
+                title="Delete model"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/>
+                </svg>
+              </button>
+            </div>
           </div>
           
           <p class="text-muted-foreground text-sm mb-6 line-clamp-2 leading-relaxed">
@@ -138,7 +151,13 @@
 
       <!-- Empty State -->
       <div v-else class="text-center py-20">
-        <p class="text-muted-foreground">No models found{{ searchQuery ? ' matching your search' : '' }}</p>
+        <p class="text-muted-foreground mb-4">No models found{{ searchQuery ? ' matching your search' : '' }}</p>
+        <button 
+          @click="router.push('/models/1')" 
+          class="text-sm text-muted-foreground hover:text-foreground transition-colors underline"
+        >
+          View Demo Model Page
+        </button>
       </div>
     </main>
 
@@ -225,11 +244,19 @@
               Cancel
             </button>
             <button 
+              v-if="!uploading"
               @click="handleUpload"
-              :disabled="!selectedFile || !uploadModelName || uploading"
+              :disabled="!selectedFile || !uploadModelName"
               class="bg-gradient-to-r from-orange-500 to-pink-600 text-white px-6 py-2 rounded-lg text-sm font-medium shadow-lg shadow-orange-500/20 hover:shadow-orange-500/40 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {{ uploading ? 'Uploading...' : 'Upload' }}
+              Upload
+            </button>
+            <button 
+              v-else
+              @click="handleAbortUpload"
+              class="bg-destructive/20 border border-destructive/50 text-destructive px-6 py-2 rounded-lg text-sm font-medium hover:bg-destructive/30 transition-all"
+            >
+              Cancel Upload
             </button>
           </div>
         </div>
@@ -336,10 +363,6 @@
         </div>
       </div>
     </div>
-
-    <button class="fixed bottom-8 right-8 w-10 h-10 rounded-full bg-white/10 backdrop-blur flex items-center justify-center text-muted-foreground hover:text-white hover:bg-white/20 transition-all" title="Help">
-      ?
-    </button>
   </div>
 </template>
 
@@ -350,8 +373,8 @@ import { models as modelsApi, authApi } from '../services/api'
 import { useAuth } from '../composables/useAuth'
 import { useFileUpload } from '../composables/useFileUpload'
 
-const { login, logout, isAuthenticated } = useAuth()
-const { uploading: isUploading, uploadProgress, uploadError: uploadErrorRef, uploadFile } = useFileUpload()
+const { login, logout, isAuthenticated, currentUser } = useAuth()
+const { uploading: isUploading, uploadProgress, uploadError: uploadErrorRef, uploadFile, abortUpload: abortUploadComposable } = useFileUpload()
 const fileInput = ref(null)
 const selectedFile = ref(null)
 const isDragging = ref(false)
@@ -359,6 +382,7 @@ const uploadModelName = ref('')
 const uploadDescription = ref('')
 const uploading = isUploading
 const uploadError = uploadErrorRef
+const deletingModelId = ref(null)
 
 const router = useRouter()
 const showUpload = ref(false)
@@ -390,14 +414,41 @@ const fetchModels = async () => {
     error.value = null
     const data = await modelsApi.list()
     
+    // Handle case where API is unavailable (dev mode graceful failure)
+    if (!data || !Array.isArray(data)) {
+      models.value = []
+      loading.value = false
+      return
+    }
+    
+    // Check ownership for each model if authenticated
+    const modelsWithOwnership = await Promise.all(
+      data.map(async (model) => {
+        let isOwner = false
+        if (isAuthenticated.value) {
+          try {
+            const ownership = await modelsApi.checkOwnership(model.id)
+            isOwner = ownership.is_owner || false
+          } catch (err) {
+            console.warn('Failed to check ownership for model', model.id, err)
+          }
+        }
+        return {
+          ...model,
+          isOwner
+        }
+      })
+    )
+    
     // Transform API response to match component expectations
-    models.value = data.map(model => ({
+    models.value = modelsWithOwnership.map(model => ({
       id: model.id,
       name: model.name,
       type: 'policy-gradient', // Default type - you might want to add this to the backend
       description: model.description || 'No description available',
       downloads: model.versions?.length || 0, // Use version count as download proxy
-      author: model.created_by || 'unknown'
+      author: model.created_by || 'unknown',
+      isOwner: model.isOwner
     }))
   } catch (err) {
     console.error('Failed to fetch models:', err)
@@ -486,6 +537,39 @@ const cancelUpload = () => {
   uploadError.value = null
 }
 
+const handleAbortUpload = async () => {
+  try {
+    await abortUploadComposable()
+    cancelUpload()
+  } catch (error) {
+    console.error('Failed to abort upload:', error)
+    uploadError.value = error.message || 'Failed to cancel upload'
+  }
+}
+
+const handleDeleteModel = async (modelId) => {
+  if (!confirm('Are you sure you want to delete this model? This action cannot be undone.')) {
+    return
+  }
+
+  try {
+    deletingModelId.value = modelId
+    await modelsApi.delete(modelId)
+    // Remove from local list
+    models.value = models.value.filter(m => m.id !== modelId)
+    // Show success message (could be replaced with toast notification)
+    console.log('Model deleted successfully')
+  } catch (error) {
+    console.error('Failed to delete model:', error)
+    const errorMessage = error.message || 'Unknown error'
+    alert(`Failed to delete model: ${errorMessage}`)
+    // Re-fetch models to ensure UI is in sync
+    await fetchModels()
+  } finally {
+    deletingModelId.value = null
+  }
+}
+
 const handleUpload = async () => {
   if (!selectedFile.value || !uploadModelName.value) {
     return
@@ -502,15 +586,15 @@ const handleUpload = async () => {
     await fetchModels()
     cancelUpload()
     
-    // Show success message (you could add a toast notification here)
-    alert('Model uploaded successfully!')
+    // Show success message (could be replaced with toast notification)
+    console.log('Model uploaded successfully!')
   } catch (error) {
     // Error is already set in uploadError by useFileUpload
     console.error('Upload failed:', error)
     // The error message should already be in uploadError from useFileUpload
     // But ensure it's displayed
     if (!uploadError.value && error.message) {
-      uploadError.value = error.message
+      uploadError.value = error.message || 'Upload failed. Please try again.'
     }
   }
 }

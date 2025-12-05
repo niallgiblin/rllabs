@@ -4,6 +4,7 @@ from database import models_collection
 def get_model_creator(model_id: str) -> str:
     """
     Get creator ID for a model (call once per model)
+    Event-driven: Creator info is cached from ModelCreated events via RabbitMQ
     """
     model = models_collection.find_one({"modelId": model_id})
     

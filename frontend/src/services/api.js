@@ -1,6 +1,10 @@
 // API service for backend communication
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080'
 
+// Development mode: if true, API failures return empty data instead of throwing errors
+// This allows frontend development when API Gateway is unavailable
+const DEV_MODE_GRACEFUL_FAIL = import.meta.env.VITE_DEV_MODE_GRACEFUL_FAIL !== 'false' // Default to true
+
 // Token management
 const TOKEN_KEY = 'rllabs_auth_token'
 
@@ -99,6 +103,11 @@ export async function apiRequest(endpoint, options = {}) {
           await new Promise(resolve => setTimeout(resolve, delay))
           continue
         }
+        // In dev mode, return null for network errors instead of throwing
+        if (DEV_MODE_GRACEFUL_FAIL) {
+          console.warn(`[DEV MODE] API unavailable: ${endpoint} - returning null`)
+          return null
+        }
         throw new Error('Network error: Unable to connect to the server. Please check your connection.')
       }
       
@@ -108,13 +117,18 @@ export async function apiRequest(endpoint, options = {}) {
   }
   
   // Should never reach here, but TypeScript/ESLint might complain
+  if (DEV_MODE_GRACEFUL_FAIL) {
+    console.warn(`[DEV MODE] API request failed after retries: ${endpoint} - returning null`)
+    return null
+  }
   throw new Error('Request failed after retries')
 }
 
 // Models API
 export const models = {
   async list() {
-    return apiRequest('/api/models')
+    const result = await apiRequest('/api/models')
+    return result || [] // Return empty array if API unavailable
   },
   
   async get(id) {
@@ -133,13 +147,18 @@ export const models = {
   },
   
   async getVersions(modelId) {
-    return apiRequest(`/api/models/${modelId}/versions`)
+    const result = await apiRequest(`/api/models/${modelId}/versions`)
+    return result || [] // Return empty array if API unavailable
   },
   
   async delete(id) {
     return apiRequest(`/api/models/${id}`, {
       method: 'DELETE'
     })
+  },
+  
+  async checkOwnership(modelId) {
+    return apiRequest(`/api/models/${modelId}/ownership`)
   }
 }
 
@@ -163,6 +182,10 @@ export const uploads = {
     return apiRequest(`/api/uploads/${uploadId}/abort`, {
       method: 'POST'
     })
+  },
+  
+  async getUploadStatus(uploadId) {
+    return apiRequest(`/api/uploads/${uploadId}`)
   }
 }
 

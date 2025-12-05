@@ -14,7 +14,7 @@
           <span class="text-xl font-bold tracking-tight">RLLabs</span>
         </div>
         <div class="flex items-center gap-4">
-          <button v-if="!isAuthenticated" class="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors">Sign In</button>
+          <button v-if="!isAuthenticated" @click="showAuth = true; isSignUp = false" class="text-sm font-medium border border-white/10 hover:bg-white/5 px-4 py-2 rounded-lg transition-colors">Sign In</button>
           <button v-else @click="logout" class="text-sm font-medium text-muted-foreground hover:text-foreground transition-colors">Sign Out</button>
         </div>
       </div>
@@ -82,6 +82,107 @@
         </div>
       </div>
     </main>
+
+    <!-- Auth Modal -->
+    <div v-if="showAuth" class="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm" @click.self="showAuth = false">
+      <div class="w-full max-w-sm bg-[#0a0a0c] border border-white/10 rounded-2xl p-8 shadow-2xl relative overflow-hidden">
+        <div class="text-center mb-8">
+          <div class="w-12 h-12 rounded-xl bg-gradient-to-br from-pink-500 to-purple-600 flex items-center justify-center text-white font-bold text-xl mx-auto mb-4 shadow-lg shadow-purple-500/30">
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-6 h-6"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg>
+          </div>
+          <h2 class="text-2xl font-bold">{{ isSignUp ? 'Create Account' : 'Welcome Back' }}</h2>
+          <p class="text-muted-foreground text-sm mt-2">{{ isSignUp ? 'Sign up to start managing your models' : 'Sign in to manage your models' }}</p>
+        </div>
+
+        <!-- Error Message -->
+        <div v-if="authError" class="mb-4 p-3 bg-destructive/20 border border-destructive/50 rounded-lg">
+          <p class="text-sm text-destructive">{{ authError }}</p>
+        </div>
+
+        <div class="space-y-4">
+          <!-- Sign Up Form -->
+          <form v-if="isSignUp" @submit.prevent="handleSignUp" class="space-y-3">
+            <input 
+              v-model="signUpForm.username"
+              type="text" 
+              placeholder="Username" 
+              required
+              class="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:border-white/30 transition-colors"
+            >
+            <input 
+              v-model="signUpForm.email"
+              type="email" 
+              placeholder="Email address" 
+              required
+              class="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:border-white/30 transition-colors"
+            >
+            <input 
+              v-model="signUpForm.password"
+              type="password" 
+              placeholder="Password" 
+              required
+              minlength="6"
+              class="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:border-white/30 transition-colors"
+            >
+            <div class="flex items-center gap-2">
+              <input 
+                v-model="signUpForm.isAdmin"
+                type="checkbox" 
+                id="isAdmin"
+                class="w-4 h-4 rounded border-white/10 bg-white/5"
+              >
+              <label for="isAdmin" class="text-sm text-muted-foreground cursor-pointer">
+                Create as admin user
+              </label>
+            </div>
+            <button 
+              type="submit"
+              :disabled="authLoading"
+              class="w-full bg-gradient-to-r from-purple-600 to-blue-600 text-white font-medium h-10 rounded-lg hover:opacity-90 transition-opacity shadow-lg shadow-purple-500/20 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {{ authLoading ? 'Creating...' : 'Sign Up' }}
+            </button>
+          </form>
+
+          <!-- Sign In Form -->
+          <form v-else @submit.prevent="handleSignIn" class="space-y-3">
+            <input 
+              v-model="signInForm.username"
+              type="text" 
+              placeholder="Username" 
+              required
+              class="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:border-white/30 transition-colors"
+            >
+            <input 
+              v-model="signInForm.password"
+              type="password" 
+              placeholder="Password" 
+              required
+              class="w-full bg-white/5 border border-white/10 rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:border-white/30 transition-colors"
+            >
+            <button 
+              type="submit"
+              :disabled="authLoading"
+              class="w-full bg-gradient-to-r from-purple-600 to-blue-600 text-white font-medium h-10 rounded-lg hover:opacity-90 transition-opacity shadow-lg shadow-purple-500/20 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {{ authLoading ? 'Signing in...' : 'Sign In' }}
+            </button>
+          </form>
+
+          <div class="relative">
+            <div class="absolute inset-0 flex items-center"><div class="w-full border-t border-white/10"></div></div>
+            <div class="relative flex justify-center text-xs uppercase"><span class="bg-[#0a0a0c] px-2 text-muted-foreground">Or</span></div>
+          </div>
+
+          <button 
+            @click="isSignUp = !isSignUp; authError = null"
+            class="w-full text-sm text-muted-foreground hover:text-foreground transition-colors"
+          >
+            {{ isSignUp ? 'Already have an account? Sign in' : "Don't have an account? Sign up" }}
+          </button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -89,18 +190,35 @@
 import { ref, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { collaboration } from '../services/collaboration'
+import { authApi } from '../services/api'
 import { useAuth } from '../composables/useAuth'
 import CommentNode from '../components/CommentNode.vue'
 
 const route = useRoute()
 const router = useRouter()
-const { isAuthenticated, currentUser, logout } = useAuth()
+const { login, logout, isAuthenticated, currentUser } = useAuth()
 
 const modelId = ref(route.params.modelId)
 const comments = ref([])
 const loading = ref(true)
 const error = ref(null)
 const newCommentContent = ref('')
+
+// Auth state
+const showAuth = ref(false)
+const isSignUp = ref(false)
+const authLoading = ref(false)
+const authError = ref(null)
+const signUpForm = ref({
+  username: '',
+  email: '',
+  password: '',
+  isAdmin: false
+})
+const signInForm = ref({
+  username: '',
+  password: ''
+})
 
 const fetchComments = async () => {
   try {
@@ -144,6 +262,49 @@ const updateComment = async (commentId, content) => {
     fetchComments() // Refresh comments
   } catch (err) {
     alert('Failed to update comment: ' + err.message)
+  }
+}
+
+const handleSignUp = async () => {
+  try {
+    authLoading.value = true
+    authError.value = null
+    
+    const response = await authApi.register(
+      signUpForm.value.username,
+      signUpForm.value.email,
+      signUpForm.value.password,
+      signUpForm.value.isAdmin
+    )
+    
+    login(response.token)
+    showAuth.value = false
+    isSignUp.value = false
+    signUpForm.value = { username: '', email: '', password: '', isAdmin: false }
+  } catch (err) {
+    authError.value = err.message || 'Failed to create account'
+  } finally {
+    authLoading.value = false
+  }
+}
+
+const handleSignIn = async () => {
+  try {
+    authLoading.value = true
+    authError.value = null
+    
+    const response = await authApi.login(
+      signInForm.value.username,
+      signInForm.value.password
+    )
+    
+    login(response.token)
+    showAuth.value = false
+    signInForm.value = { username: '', password: '' }
+  } catch (err) {
+    authError.value = err.message || 'Invalid username or password'
+  } finally {
+    authLoading.value = false
   }
 }
 

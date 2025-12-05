@@ -297,22 +297,34 @@ async def get_version_by_hash(content_hash: str, db: Session = Depends(database.
         Model version information if found
     """
     # Normalize hash format (accept with or without 'sha256:' prefix)
+    # Database may store hashes with or without prefix, so check both formats
     if content_hash.startswith("sha256:"):
         normalized_hash = content_hash
+        hash_without_prefix = content_hash[7:]  # Remove "sha256:" prefix
     else:
         normalized_hash = f"sha256:{content_hash}"
+        hash_without_prefix = content_hash
     
     try:
+        # Try with prefix first (most common format)
         version = (
             db.query(database.ModelVersion)
             .filter(database.ModelVersion.content_hash == normalized_hash)
             .first()
         )
         
+        # If not found, try without prefix (for backwards compatibility)
+        if not version:
+            version = (
+                db.query(database.ModelVersion)
+                .filter(database.ModelVersion.content_hash == hash_without_prefix)
+                .first()
+            )
+        
         if not version:
             raise HTTPException(
                 status_code=404, 
-                detail=f"No model version found with content hash: {normalized_hash}"
+                detail=f"No model version found with content hash: {content_hash}"
             )
         
         return version
@@ -419,7 +431,14 @@ async def delete_model(
     try:
         model_name = db_model.name
         
-        # Delete model (cascades to versions via foreign key)
+        # Delete all versions first (to avoid foreign key constraint issues)
+        versions = db.query(database.ModelVersion).filter(
+            database.ModelVersion.model_id == model_id
+        ).all()
+        for version in versions:
+            db.delete(version)
+        
+        # Delete model
         db.delete(db_model)
         db.commit()
         

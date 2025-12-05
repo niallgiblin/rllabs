@@ -473,33 +473,52 @@ class TestModelCatalogQueries:
     
     def test_get_version_by_hash(self):
         """Test getting a version by content hash"""
-        # First, find a model with versions
-        models_response = requests.get(f"{GATEWAY_URL}/api/models")
-        if models_response.status_code == 200:
-            models = models_response.json()
-            for model in models:
-                model_id = model["id"]
-                versions_response = requests.get(
-                    f"{GATEWAY_URL}/api/models/{model_id}/versions"
-                )
-                if versions_response.status_code == 200:
-                    versions = versions_response.json()
-                    if versions:
-                        content_hash = versions[0]["content_hash"]
-                        
-                        # Query by hash
-                        hash_response = requests.get(
-                            f"{GATEWAY_URL}/api/versions/by-hash/{content_hash}"
-                        )
-                        assert hash_response.status_code == 200
-                        assert hash_response.json()["content_hash"] == content_hash
-                        return
-        
-        # If no versions found, test with invalid hash
-        hash_response = requests.get(
+        # First, verify the endpoint exists by testing with an invalid hash
+        # This ensures the routing is working correctly
+        invalid_hash_response = requests.get(
             f"{GATEWAY_URL}/api/versions/by-hash/sha256:invalid123"
         )
-        assert hash_response.status_code == 404
+        # Should return 404 (not found), not 500 (server error) or other errors
+        assert invalid_hash_response.status_code == 404, \
+            f"Expected 404 for invalid hash, got {invalid_hash_response.status_code}. " \
+            f"Response: {invalid_hash_response.text}"
+        
+        # Now try to find a model with versions to test with a valid hash
+        models_response = requests.get(f"{GATEWAY_URL}/api/models")
+        assert models_response.status_code == 200, \
+            f"Failed to get models list: {models_response.status_code}"
+        
+        models = models_response.json()
+        assert isinstance(models, list), "Models response should be a list"
+        
+        # Search for a model with versions
+        content_hash = None
+        for model in models:
+            model_id = model["id"]
+            versions_response = requests.get(
+                f"{GATEWAY_URL}/api/models/{model_id}/versions"
+            )
+            if versions_response.status_code == 200:
+                versions = versions_response.json()
+                if versions and len(versions) > 0:
+                    content_hash = versions[0]["content_hash"]
+                    break
+        
+        # If we found a version, test with valid hash
+        if content_hash:
+            hash_response = requests.get(
+                f"{GATEWAY_URL}/api/versions/by-hash/{content_hash}"
+            )
+            assert hash_response.status_code == 200, \
+                f"Expected 200 for valid hash {content_hash}, got {hash_response.status_code}. " \
+                f"Response: {hash_response.text}"
+            version_data = hash_response.json()
+            assert version_data["content_hash"] == content_hash, \
+                f"Content hash mismatch. Expected {content_hash}, got {version_data.get('content_hash')}"
+        else:
+            # If no versions exist, that's okay - we've already verified the endpoint works
+            # by testing with an invalid hash above
+            pytest.skip("No model versions found in database to test with valid hash")
     
     def test_list_all_models(self):
         """Test listing all models (public endpoint)"""

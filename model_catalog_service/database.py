@@ -25,13 +25,13 @@ class Model(Base):
     created_by = Column(String, index=True) # User ID from the API Gateway
     created_at = Column(DateTime, default=datetime.now(timezone.utc))
 
-    versions = relationship("ModelVersion", back_populates="model")
+    versions = relationship("ModelVersion", back_populates="model", cascade="all, delete-orphan")
 
 class ModelVersion(Base):
     __tablename__ = "model_versions"
 
     id = Column(Integer, primary_key=True, index=True)
-    model_id = Column(Integer, ForeignKey("models.id"), nullable=False)
+    model_id = Column(Integer, ForeignKey("models.id", ondelete="CASCADE"), nullable=False)
     version = Column(Integer, nullable=False)
     storage_path = Column(String, nullable=False)
     content_hash = Column(String, nullable=False) # SHA-256 of the model file

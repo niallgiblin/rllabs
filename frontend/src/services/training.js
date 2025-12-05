@@ -5,39 +5,41 @@
 import { apiRequest } from './api.js'
 
 export const training = {
-  // Training Jobs API (to be implemented)
+  // Training Jobs API
   async listJobs() {
-    return apiRequest('/api/training/jobs')
+    const result = await apiRequest('/api/training-jobs')
+    return result || [] // Return empty array if API unavailable
   },
   
   async getJob(jobId) {
-    return apiRequest(`/api/training/jobs/${jobId}`)
+    return apiRequest(`/api/training-jobs/${jobId}`)
   },
   
   async createJob(jobConfig) {
-    return apiRequest('/api/training/jobs', {
+    return apiRequest('/api/training-jobs', {
       method: 'POST',
       body: JSON.stringify(jobConfig)
     })
   },
   
   async cancelJob(jobId) {
-    return apiRequest(`/api/training/jobs/${jobId}/cancel`, {
+    return apiRequest(`/api/training-jobs/${jobId}/cancel`, {
       method: 'POST'
     })
   },
   
   async getJobLogs(jobId) {
-    return apiRequest(`/api/training/jobs/${jobId}/logs`)
+    return apiRequest(`/api/training-jobs/${jobId}/logs`)
   },
   
   async getJobStatus(jobId) {
-    return apiRequest(`/api/training/jobs/${jobId}/status`)
+    return apiRequest(`/api/training-jobs/${jobId}/status`)
   },
   
   // Checkpoints API (to be implemented)
   async listCheckpoints(jobId) {
-    return apiRequest(`/api/training/jobs/${jobId}/checkpoints`)
+    const result = await apiRequest(`/api/training-jobs/${jobId}/checkpoints`)
+    return result || [] // Return empty array if API unavailable
   },
   
   async getCheckpoint(checkpointId) {

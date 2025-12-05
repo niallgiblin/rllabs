@@ -7,7 +7,8 @@ import { apiRequest } from './api.js'
 export const collaboration = {
   // Comments API (to be implemented)
   async getComments(modelId) {
-    return apiRequest(`/api/models/${modelId}/comments`)
+    const result = await apiRequest(`/api/models/${modelId}/comments`)
+    return result || [] // Return empty array if API unavailable
   },
   
   async createComment(modelId, comment) {
