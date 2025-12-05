@@ -48,7 +48,7 @@ except ImportError:
 # APPLICATION IMPORTS
 # =============================================================================
 from fastapi import FastAPI, Depends, HTTPException, Header, status, Request, BackgroundTasks, Query
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from sqlalchemy.orm import Session
 from contextlib import asynccontextmanager
 from typing import Optional, List
@@ -490,6 +490,48 @@ async def abort_upload(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to abort upload: {str(e)}"
         )
+
+@app.head("/downloads/{artifact_id}", tags=["Downloads"])
+async def check_download_url(
+    artifact_id: str,
+    db: Session = Depends(get_read_db),
+    user_id: Optional[str] = Header(None, alias="X-User-Id")
+):
+    """
+    Check if an artifact exists (HEAD request for validation)
+    
+    Used by training service to validate artifacts before downloading.
+    Returns 200 if artifact exists and user has permission, 404/403 otherwise.
+    """
+    storage = get_storage_service()
+    
+    try:
+        # Check permissions
+        has_permission, error_code = await check_download_permission(db, user_id, artifact_id)
+        if not has_permission:
+            if error_code == "404":
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Artifact {artifact_id} not found")
+            elif error_code == "403":
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Permission denied")
+            else:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid request")
+        
+        # Verify artifact exists in storage
+        object_key = artifact_id
+        file_info = await storage.get_object_info(object_key)
+        
+        if not file_info:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Artifact {artifact_id} not found")
+        
+        # Return 200 with no body (HEAD request)
+        return Response(status_code=200)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error checking artifact {artifact_id}: {e}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Internal server error")
+
 
 @app.get("/downloads/{artifact_id}", response_model=DownloadResponse, tags=["Downloads"])
 async def get_download_url(
