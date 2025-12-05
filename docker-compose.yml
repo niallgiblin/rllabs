@@ -1,7 +1,9 @@
 services:
   # API Gateway
   api-gateway:
-    build: ./api_gateway
+    build:
+      context: .
+      dockerfile: ./api_gateway/Dockerfile
     ports:
       - "8080:8080"
     environment:
@@ -19,7 +21,8 @@ services:
   # Model Catalog Service (AP System)
   model-catalog-service:
     build:
-      context: ./model_catalog_service
+      context: .
+      dockerfile: ./model_catalog_service/Dockerfile
     container_name: model-catalog-service
     # Expose for local tests hitting localhost:8001
     ports:
@@ -47,7 +50,8 @@ services:
   # Upload/Download Service
   upload-download-service:
     build:
-      context: ./upload_download_service
+      context: .
+      dockerfile: ./upload_download_service/Dockerfile
     container_name: upload-download-service
     # Expose for local tests hitting localhost:8002
     ports:
@@ -89,7 +93,8 @@ services:
   # Training Service
   model-train-service:
     build:
-      context: ./model_train_service
+      context: .
+      dockerfile: ./model_train_service/Dockerfile
     container_name: model-train-service
     environment:
       # Upload/Download Service URL for downloading artifacts
@@ -304,7 +309,8 @@ services:
   # Collaboration Service
   collaboration-service:
     build:
-      context: ./collaboration_service
+      context: .
+      dockerfile: ./collaboration_service/dockerfile
     container_name: collaboration-service
     ports:
       - "8004:8000"

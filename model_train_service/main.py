@@ -9,7 +9,7 @@ import asyncio
 from contextlib import asynccontextmanager
 
 # Add shared module to path
-shared_path = os.path.join(os.path.dirname(__file__), '..', 'shared')
+shared_path = os.path.join(os.path.dirname(__file__), 'shared')
 if os.path.exists(shared_path) and shared_path not in sys.path:
     sys.path.insert(0, shared_path)
 

@@ -47,7 +47,7 @@ except ImportError:
 # =============================================================================
 # APPLICATION IMPORTS
 # =============================================================================
-from fastapi import FastAPI, Depends, HTTPException, Header, status, Request, BackgroundTasks
+from fastapi import FastAPI, Depends, HTTPException, Header, status, Request, BackgroundTasks, Query
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from contextlib import asynccontextmanager
@@ -366,13 +366,21 @@ async def complete_upload(
             result['registered_with_catalog'] = True
             
         except Exception as e:
-            logger.error(f"Failed to register with Model Catalog: {e}")
-            # Mark upload as failed since catalog registration is required
-            await session_manager.fail_upload(upload_id, f"Model Catalog registration failed: {str(e)}")
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=f"Upload completed but failed to register with Model Catalog: {str(e)}"
-            )
+            error_str = str(e)
+            # 409 Conflict means version already exists - this is fine, upload was successful
+            if "409" in error_str or "Conflict" in error_str:
+                logger.warning(f"Model Catalog returned 409 (version already exists) - upload successful: {e}")
+                result['registered_with_catalog'] = False
+                result['catalog_message'] = "Version already exists in catalog"
+                # Don't mark as failed - the upload was successful
+            else:
+                logger.error(f"Failed to register with Model Catalog: {e}")
+                # Mark upload as failed since catalog registration is required (except for 409)
+                await session_manager.fail_upload(upload_id, f"Model Catalog registration failed: {str(e)}")
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail=f"Upload completed but failed to register with Model Catalog: {str(e)}"
+                )
         
         # ASYNCHRONOUS: Publish ArtifactUploaded event in background (best-effort, fail-open)
         # This is optional - if it fails, we log but don't fail the upload
@@ -790,9 +798,82 @@ async def register_with_model_catalog(
         raise Exception(f"Model Catalog unavailable: {str(e)}")
 
 
+@app.get("/training-jobs", tags=["Training"])
+async def list_training_jobs(
+    user_id: Optional[str] = Header(None, alias="X-User-Id"),
+    model_id: Optional[int] = Query(None, description="Filter by model ID")
+):
+    """
+    List all training jobs
+    
+    Returns a list of training jobs. If user_id is provided, filters by user.
+    If model_id is provided as query parameter, filters by model.
+    
+    Jobs are stored in Redis by the training service with keys like "job:{job_id}".
+    """
+    import redis
+    import json
+    from typing import List, Dict, Any
+    
+    try:
+        # Connect to Redis (same config as model-train-service)
+        REDIS_HOST = os.getenv("REDIS_HOST", "redis_cache")
+        REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
+        REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
+        
+        redis_client = redis.Redis(
+            host=REDIS_HOST,
+            port=REDIS_PORT,
+            password=REDIS_PASSWORD if REDIS_PASSWORD else None,
+            decode_responses=True,
+            socket_timeout=1.0,
+            socket_connect_timeout=1.0
+        )
+        
+        # Scan for all job keys (pattern: job:*)
+        jobs: List[Dict[str, Any]] = []
+        cursor = 0
+        pattern = "job:*"
+        
+        while True:
+            cursor, keys = redis_client.scan(cursor, match=pattern, count=100)
+            for key in keys:
+                try:
+                    job_data = redis_client.get(key)
+                    if job_data:
+                        job = json.loads(job_data)
+                        # Filter by user_id if provided
+                        if user_id and job.get("user_id") != user_id:
+                            continue
+                        # Filter by model_id if provided
+                        if model_id is not None and job.get("model_id") != model_id:
+                            continue
+                        jobs.append(job)
+                except Exception as e:
+                    logger.warning(f"Failed to parse job data from key {key}: {e}")
+                    continue
+            
+            if cursor == 0:
+                break
+        
+        # Sort by created_at (newest first)
+        jobs.sort(key=lambda x: x.get("created_at", ""), reverse=True)
+        
+        return jobs
+        
+    except redis.ConnectionError:
+        logger.warning("Redis not available for listing training jobs")
+        return []
+    except Exception as e:
+        logger.error(f"Error listing training jobs: {e}", exc_info=True)
+        # Return empty list on error (fail-open)
+        return []
+
+
 @app.post("/training-jobs", response_model=TrainingJobResponse, status_code=202, tags=["Training"])
 async def trigger_training_job(
     request: TrainingJobRequest,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     user_id: str = Header(..., alias="X-User-Id")
 ):
@@ -890,6 +971,48 @@ async def trigger_training_job(
                 logger.warning(f"Training job {job_id} created but publisher unavailable")
         
         background_tasks.add_task(publish_job)
+        
+        # Create job status in Redis immediately so it appears in the list
+        try:
+            import redis
+            import json
+            from datetime import datetime, timezone
+            
+            REDIS_HOST = os.getenv("REDIS_HOST", "redis_cache")
+            REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
+            REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
+            
+            redis_client = redis.Redis(
+                host=REDIS_HOST,
+                port=REDIS_PORT,
+                password=REDIS_PASSWORD if REDIS_PASSWORD else None,
+                decode_responses=True,
+                socket_timeout=1.0,
+                socket_connect_timeout=1.0
+            )
+            
+            job_status = {
+                "job_id": job_id,
+                "user_id": user_id,
+                "model_id": model_id,
+                "status": "queued",
+                "progress": 0.0,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "started_at": None,
+                "completed_at": None,
+                "error": None
+            }
+            
+            # Store with 24 hour TTL (same as training service)
+            redis_client.setex(
+                f"job:{job_id}",
+                86400,  # 24 hours
+                json.dumps(job_status)
+            )
+            logger.info(f"Created job status entry in Redis for {job_id}")
+        except Exception as e:
+            # Fail-open: don't fail the request if Redis is unavailable
+            logger.warning(f"Failed to create job status in Redis: {e}")
         
         # Return immediately - job publishing happens in background
         return TrainingJobResponse(

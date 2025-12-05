@@ -5,7 +5,6 @@ from database import db, cache, models_collection
 import os
 import threading
 
-# Global RabbitMQ connection and channel (reused across requests)
 _rabbitmq_connection = None
 _rabbitmq_channel = None
 _rabbitmq_lock = threading.Lock()
@@ -18,27 +17,24 @@ def get_rabbitmq_connection():
     global _rabbitmq_connection, _rabbitmq_channel
     
     with _rabbitmq_lock:
-        # Check if connection is closed (handle pika internal errors)
+
         connection_closed = False
         if _rabbitmq_connection is not None:
             try:
                 connection_closed = _rabbitmq_connection.is_closed
             except (IndexError, AttributeError) as e:
-                # Handle pika internal deque errors
-                print(f"⚠️  Pika connection state check error (likely deque issue): {e}")
+                print(f"Pika connection state check error (likely deque issue): {e}")
                 connection_closed = True
             except Exception as e:
-                print(f"⚠️  Error checking connection state: {e}")
+                print(f"Error checking connection state: {e}")
                 connection_closed = True
         
         if _rabbitmq_connection is None or connection_closed:
-            # Clean up old connection state safely
             if _rabbitmq_connection is not None:
                 try:
                     if not _rabbitmq_connection.is_closed:
                         _rabbitmq_connection.close()
                 except (IndexError, AttributeError):
-                    # Ignore pika internal deque errors during cleanup
                     pass
                 except Exception:
                     pass
@@ -57,19 +53,18 @@ def get_rabbitmq_connection():
                         credentials=credentials,
                         heartbeat=600,
                         blocked_connection_timeout=300,
-                        connection_attempts=3,  # Retry up to 3 times
-                        retry_delay=2,  # 2 seconds between retries
-                        socket_timeout=5  # 5 second timeout per attempt
+                        connection_attempts=3,  
+                        retry_delay=2,  
+                        socket_timeout=5  
                     )
                 )
                 _rabbitmq_channel = _rabbitmq_connection.channel()
                 
-                # Declare exchange once (idempotent)
                 _rabbitmq_channel.exchange_declare(exchange='comments', exchange_type='topic', durable=True)
                 
-                print("✅ RabbitMQ connection established (reused)")
+                print("RabbitMQ connection established (reused)")
             except Exception as e:
-                print(f"⚠️  Failed to connect to RabbitMQ: {e}")
+                print(f"Failed to connect to RabbitMQ: {e}")
                 _rabbitmq_connection = None
                 _rabbitmq_channel = None
         
@@ -87,7 +82,7 @@ def publish_comment_created(comment_data: dict):
         connection, channel = get_rabbitmq_connection()
         
         if connection is None or channel is None:
-            print(f"⚠️  RabbitMQ not available, skipping CommentCreated event for comment {comment_data.get('id')}")
+            print(f"RabbitMQ not available, skipping CommentCreated event for comment {comment_data.get('id')}")
             return
         
         event = {
@@ -101,15 +96,14 @@ def publish_comment_created(comment_data: dict):
             routing_key='comment.created',
             body=json.dumps(event),
             properties=pika.BasicProperties(
-                delivery_mode=2,  # Make message persistent
+                delivery_mode=2, 
                 content_type='application/json'
             )
         )
         
-        print(f"✅ Published CommentCreated event for comment {comment_data.get('id')}")
+        print(f"Published CommentCreated event for comment {comment_data.get('id')}")
     except Exception as e:
-        print(f"⚠️  Failed to publish CommentCreated event: {e}")
-        # Fail-open: don't block request if event publishing fails
+        print(f"Failed to publish CommentCreated event: {e}")
 
 
 
@@ -121,28 +115,26 @@ def handle_model_deleted(ch, method, properties, body):
     """
     
     event = json.loads(body)
-    # Model Catalog format: {"event_type": "ModelDeleted", "model_id": 1, ...}
-    model_id = str(event.get("model_id"))  # Convert to string for MongoDB
+    model_id = str(event.get("model_id")) 
     
     if not model_id:
-        print("⚠️  ModelDeleted event missing model_id")
+        print("ModelDeleted event missing model_id")
         ch.basic_ack(delivery_tag=method.delivery_tag)
         return
     
-    # Archive comments for deleted model 
     result = db.comments.update_many(
         {"modelId": model_id},
         {"$set": {"archived": True, "archivedAt": datetime.utcnow()}}
     )
     
-    # Invalidate cache
+ 
     try:
         if cache:
             cache.delete(f"comments:{model_id}")
     except Exception:
-        pass  # Fail-open: cache failures don't break the service
+        pass  
     
-    print(f"✅ Archived {result.modified_count} comments for deleted model {model_id}")
+    print(f"Archived {result.modified_count} comments for deleted model {model_id}")
     ch.basic_ack(delivery_tag=method.delivery_tag)
 
 
@@ -155,16 +147,14 @@ def handle_model_created(ch, method, properties, body):
     """
     
     event = json.loads(body)
-    # Model Catalog format: {"event_type": "ModelCreated", "model_id": 1, "created_by": "user-123", ...}
-    model_id = str(event.get("model_id"))  # Convert to string for MongoDB
-    creator_id = event.get("created_by")  # Model Catalog uses "created_by"
+    model_id = str(event.get("model_id"))  
+    creator_id = event.get("created_by") 
     
     if not model_id or not creator_id:
-        print(f"⚠️  ModelCreated event missing model_id or created_by. Event: {event}")
+        print(f"ModelCreated event missing model_id or created_by. Event: {event}")
         ch.basic_ack(delivery_tag=method.delivery_tag)
         return
     
-    # Cache model metadata in local collection for badge logic
     models_collection.update_one(
         {"modelId": model_id},
         {"$set": {
@@ -175,7 +165,7 @@ def handle_model_created(ch, method, properties, body):
         upsert=True
     )
     
-    print(f"✅ Cached creator info for model {model_id} (creator: {creator_id})")
+    print(f"Cached creator info for model {model_id} (creator: {creator_id})")
     ch.basic_ack(delivery_tag=method.delivery_tag)
 
 
@@ -189,42 +179,78 @@ def start_event_subscriber():
     Model Catalog publishes to 'model_events' exchange with routing keys 'model.created' and 'model.deleted'
     """
     
-    connection = get_rabbitmq_connection()
-    channel = connection.channel()
+    connection, channel = get_rabbitmq_connection()
     
-    # Declare exchange for model events (Model Catalog uses 'model_events')
+    if connection is None or channel is None:
+        print("RabbitMQ not available, event subscriber not started")
+        return
+    
     channel.exchange_declare(exchange='model_events', exchange_type='topic', durable=True)
     
-    # Create queue for this service
     result = channel.queue_declare(queue='collaboration_service_queue', durable=True)
     queue_name = result.method.queue
     
-    # Bind to model events (Model Catalog routing keys)
     channel.queue_bind(exchange='model_events', queue=queue_name, routing_key='model.deleted')
     channel.queue_bind(exchange='model_events', queue=queue_name, routing_key='model.created')
     
     
-    # Set up consumers
+
     def callback(ch, method, properties, body):
         
         try:
             event = json.loads(body)
-            # Model Catalog format: {"event_type": "ModelCreated", ...} or {"event_type": "ModelDeleted", ...}
-            event_type = event.get("event_type")  # Model Catalog uses "event_type" not "eventType"
+            event_type = event.get("event_type")  
             
             if event_type == "ModelDeleted":
                 handle_model_deleted(ch, method, properties, body)
             elif event_type == "ModelCreated":
                 handle_model_created(ch, method, properties, body)
             else:
-                print(f"⚠️  Unknown event type: {event_type}")
+                print(f"Unknown event type: {event_type}")
                 ch.basic_ack(delivery_tag=method.delivery_tag)
         except Exception as e:
-            print(f"⚠️  Error processing event: {e}")
-            ch.basic_ack(delivery_tag=method.delivery_tag)  # Ack to prevent infinite retry
+            print(f"Error processing event: {e}")
+            ch.basic_ack(delivery_tag=method.delivery_tag) 
     
     
-    channel.basic_consume(queue=queue_name, on_message_callback=callback)
-    
-    print("✅ Started listening for model events from 'model_events' exchange...")
-    channel.start_consuming()
+    try:
+        print(f"Setting up consumer for queue: {queue_name}")
+        channel.basic_consume(queue=queue_name, on_message_callback=callback, auto_ack=False)
+        
+        print("Started listening for model events from 'model_events' exchange...")
+        print("Waiting for ModelCreated and ModelDeleted events...")
+        channel.start_consuming()
+    except KeyboardInterrupt:
+        print("Event subscriber interrupted")
+        try:
+            channel.stop_consuming()
+        except:
+            pass
+    except Exception as e:
+        print(f"Error in event subscriber: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        try:
+            if channel and not channel.is_closed:
+                channel.close()
+        except:
+            pass
+        try:
+            if connection and not connection.is_closed:
+                connection.close()
+        except:
+            pass
+        
+        global _rabbitmq_connection, _rabbitmq_channel
+        _rabbitmq_connection = None
+        _rabbitmq_channel = None
+
+        import time
+        time.sleep(5)
+        print("Retrying event subscriber connection...")
+
+        try:
+            start_event_subscriber()
+        except RecursionError:
+            print("Event subscriber failed after multiple retries, giving up")

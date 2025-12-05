@@ -722,7 +722,8 @@ def test_upload_download_service_health():
     4. Overall service status is accurate
     """
     try:
-        response = requests.get(f"{UPLOAD_DOWNLOAD_DIRECT_URL}/health", timeout=3)
+        # Use detailed health check endpoint which includes dependencies
+        response = requests.get(f"{UPLOAD_DOWNLOAD_DIRECT_URL}/health/detailed", timeout=3)
         assert response.status_code == 200, \
             f"Health endpoint should return 200, got {response.status_code}"
         

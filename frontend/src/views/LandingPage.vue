@@ -407,22 +407,47 @@ const searchQuery = ref('')
 const selectedFilter = ref('all')
 const sortBy = ref('newest')
 
-// Fetch models from API
-const fetchModels = async (page = 1, pageSize = 50) => {
+// Fetch models from API - fetch all pages if needed
+const fetchModels = async (page = 1, pageSize = 200) => {
   try {
     loading.value = true
     error.value = null
-    const response = await modelsApi.list(page, pageSize)
     
-    // Handle paginated response - extract items array
-    const data = response.items || response // Support both paginated and legacy format
+    // Fetch first page
+    let response = await modelsApi.list(page, pageSize)
+    let allModels = []
     
-    // Handle case where API is unavailable (dev mode graceful failure)
-    if (!data || !Array.isArray(data)) {
+    // Handle paginated response
+    if (response.items && Array.isArray(response.items)) {
+      allModels = [...response.items]
+      
+      // If there are more pages, fetch them all
+      const totalPages = response.total_pages || 1
+      if (totalPages > 1) {
+        for (let p = 2; p <= totalPages; p++) {
+          try {
+            const nextPage = await modelsApi.list(p, pageSize)
+            if (nextPage.items && Array.isArray(nextPage.items)) {
+              allModels = [...allModels, ...nextPage.items]
+            }
+          } catch (err) {
+            console.warn(`Failed to fetch page ${p}:`, err)
+            // Continue with what we have
+            break
+          }
+        }
+      }
+    } else if (Array.isArray(response)) {
+      // Legacy format - direct array
+      allModels = response
+    } else {
+      // Handle case where API is unavailable (dev mode graceful failure)
       models.value = []
       loading.value = false
       return
     }
+    
+    const data = allModels
     
     // Check ownership for each model if authenticated
     const modelsWithOwnership = await Promise.all(

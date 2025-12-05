@@ -419,16 +419,20 @@ async def register_model_version(
         db.refresh(db_version)
         
         # Invalidate version-related caches (new version changes latest) - fail-open
+        # IMPORTANT: Also invalidate models list cache so new models appear immediately
         if CACHING_ENABLED:
             try:
                 invalidate_model_versions(model_id)
                 invalidate_model(model_id)  # Model details include versions
+                # CRITICAL: Invalidate models list cache so newly created models appear
+                # When a model is created and first version is registered, the list cache needs to be cleared
+                invalidate_models_list()  # This invalidates both paginated and non-paginated caches
                 # Also invalidate count cache (new version doesn't change model count, but be safe)
                 try:
                     get_cache().delete(f"{PREFIX}:models:count")
                 except Exception:
                     pass  # Best effort
-                logger.info(f"Cache invalidated after registering version for model {model_id}")
+                logger.info(f"Cache invalidated after registering version for model {model_id} (including models list)")
             except Exception as e:
                 logger.warning(f"Failed to invalidate cache after registering version: {e}")
                 # Don't fail the request if cache invalidation fails
@@ -1234,24 +1238,32 @@ async def delete_model(
         # Delete model
         db.delete(db_model)
         db.commit()
+        # Refresh the session to ensure the deletion is immediately visible
+        db.expire_all()
         
         # Write-through cache: Remove model from cached list
         if CACHING_ENABLED:
             try:
-                cached_list = get_cached_models_list()
-                if cached_list is not None:
-                    # Cache exists - remove model from cached list (write-through)
-                    cached_list = [m for m in cached_list if m.get("id") != model_id]
-                    cache_models_list(cached_list)
-                    logger.info(f"Cache updated (write-through) after deleting model {model_id}")
-                # Also invalidate individual model caches and ownership caches
+                # CRITICAL: Always invalidate ALL caches first (including paginated)
+                # This ensures the deleted model name is immediately available for reuse
+                invalidate_models_list()  # This now invalidates both paginated and non-paginated
+                invalidate_model(model_id)
+                invalidate_model_ownership(model_id)
+                # Invalidate count cache (deleted model changes total count)
+                get_cache().delete(f"{PREFIX}:models:count")
+                logger.info(f"All caches invalidated after deleting model {model_id}")
+                
+                # Optional: Try to update cached list if it exists (write-through optimization)
+                # But don't rely on this - invalidation is more important
                 try:
-                    invalidate_model(model_id)
-                    invalidate_model_ownership(model_id)
-                    # Invalidate count cache (deleted model changes total count)
-                    get_cache().delete(f"{PREFIX}:models:count")
+                    cached_list = get_cached_models_list()
+                    if cached_list is not None:
+                        # Cache exists - remove model from cached list (write-through)
+                        cached_list = [m for m in cached_list if m.get("id") != model_id]
+                        cache_models_list(cached_list)
+                        logger.info(f"Cache updated (write-through) after deleting model {model_id}")
                 except Exception:
-                    pass  # Best effort
+                    pass  # Best effort - invalidation already happened
             except Exception as e:
                 logger.warning(f"Failed to update cache after deleting model: {e}")
                 # Fallback to invalidation

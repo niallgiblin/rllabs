@@ -447,9 +447,26 @@ def get_cached_model_ownership(model_id: int, user_id: str) -> Optional[dict]:
 # ============================================================================
 
 def invalidate_models_list() -> None:
-    """Invalidate the models list cache"""
-    get_cache().delete(MODELS_LIST_KEY)
-    logger.info("Invalidated models list cache")
+    """Invalidate the models list cache (both paginated and non-paginated)"""
+    cache = get_cache()
+    # Delete the main list cache
+    cache.delete(MODELS_LIST_KEY)
+    # Also delete all paginated list caches (pattern: models:list:page:*:size:*)
+    try:
+        # Delete all keys matching the paginated pattern
+        pattern = f"{MODELS_LIST_KEY}:page:*"
+        cache.delete_pattern(pattern)
+    except Exception as e:
+        # If pattern deletion fails, try to delete common page sizes manually
+        logger.warning(f"Failed to delete paginated cache pattern: {e}")
+        # Best effort: delete a few common page sizes
+        for page_size in [10, 20, 50, 100]:
+            for page in range(1, 11):  # Delete first 10 pages
+                try:
+                    cache.delete(f"{MODELS_LIST_KEY}:page:{page}:size:{page_size}")
+                except Exception:
+                    pass
+    logger.info("Invalidated models list cache (including paginated)")
 
 def invalidate_model(model_id: int) -> None:
     """Invalidate all caches for a specific model"""
@@ -457,8 +474,14 @@ def invalidate_model(model_id: int) -> None:
     cache.delete(model_key(model_id))
     cache.delete(model_latest_key(model_id))
     cache.delete(model_versions_key(model_id))
-    # Also invalidate the list since model data changed
+    # Also invalidate the list since model data changed (both paginated and non-paginated)
     cache.delete(MODELS_LIST_KEY)
+    # Invalidate paginated caches
+    try:
+        pattern = f"{MODELS_LIST_KEY}:page:*"
+        cache.delete_pattern(pattern)
+    except Exception:
+        pass  # Best effort
     logger.info(f"Invalidated cache for model {model_id}")
 
 def invalidate_model_versions(model_id: int) -> None:

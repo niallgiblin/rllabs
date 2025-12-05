@@ -352,6 +352,77 @@ class SessionManager:
         if not session:
             raise Exception(f"Upload session {upload_id} not found or unauthorized")
         
+        # Idempotency: If already completed, return the existing result
+        if session.status == UploadStatus.COMPLETED:
+            logger.info(f"Upload session {upload_id} already completed, returning existing result")
+            # Return the same structure as a successful completion
+            # Extract version from storage_path if available (format: "models/{model_id}/v{version}")
+            version = 1
+            if session.storage_path:
+                import re
+                match = re.search(r'/v(\d+)$', session.storage_path)
+                if match:
+                    version = int(match.group(1))
+            
+            return {
+                "artifact_id": session.file_hash,  # Content hash is the artifact ID
+                "status": "completed",
+                "storage_path": session.storage_path or f"models/{session.model_id}/v{version}",
+                "model_id": session.model_id,
+                "version": version,
+                "filename": session.filename,
+                "file_size": session.file_size
+            }
+        
+        # Handle retry of failed uploads that actually succeeded (e.g., 409 from Model Catalog)
+        if session.status == UploadStatus.FAILED:
+            # Check if the error was a 409 (version already exists) - in that case, upload was successful
+            if session.error_message and ("409" in session.error_message or "version already exists" in session.error_message.lower()):
+                # Verify file exists in storage
+                final_object_key = session.file_hash
+                object_info = await self.storage.get_object_info(final_object_key)
+                if object_info:
+                    # File exists - the upload was actually successful, just Model Catalog registration failed with 409
+                    logger.info(f"Upload {upload_id} failed with 409 but file exists - treating as completed")
+                    # Mark as completed
+                    session.status = UploadStatus.COMPLETED
+                    session.error_message = None
+                    if not session.storage_path:
+                        # Try to reconstruct storage_path
+                        version = 1
+                        if session.model_id:
+                            from sqlalchemy import func
+                            existing_versions = self.db.query(UploadSession).filter(
+                                and_(
+                                    UploadSession.model_id == session.model_id,
+                                    UploadSession.status == UploadStatus.COMPLETED
+                                )
+                            ).count()
+                            version = existing_versions + 1
+                        session.storage_path = f"models/{session.model_id}/v{version}" if session.model_id else f"models/unknown/v{version}"
+                    session.completed_at = datetime.now(timezone.utc)
+                    self.db.commit()
+                    
+                    # Return success
+                    version = 1
+                    if session.storage_path:
+                        import re
+                        match = re.search(r'/v(\d+)$', session.storage_path)
+                        if match:
+                            version = int(match.group(1))
+                    
+                    return {
+                        "artifact_id": session.file_hash,
+                        "status": "completed",
+                        "storage_path": session.storage_path,
+                        "model_id": session.model_id,
+                        "version": version,
+                        "filename": session.filename,
+                        "file_size": session.file_size
+                    }
+            # If it's a real failure (not 409), raise error
+            raise Exception(f"Upload session {upload_id} is not in INITIATED state (current: {session.status})")
+        
         if session.status != UploadStatus.INITIATED:
             raise Exception(f"Upload session {upload_id} is not in INITIATED state (current: {session.status})")
         
