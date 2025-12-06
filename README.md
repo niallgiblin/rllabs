@@ -271,16 +271,16 @@ docker compose up --build
 
 This starts:
 
-- **Frontend** on http://localhost:5173 (Vue.js dev server with hot reload)
+- **Frontend** on http://localhost:5173 (Vite dev server with hot reload)
 - **API Gateway** on http://localhost:8080 (single entry point for all API requests)
 - **Model Catalog** (accessible via API Gateway at http://localhost:8080/api/models)
 - **Upload/Download Service** (accessible via API Gateway at http://localhost:8080/api/uploads and /api/downloads)
 - **Training Service** (RabbitMQ consumer, no HTTP port)
 - **Collaboration Service** (accessible via API Gateway at http://localhost:8080/api/comments)
-- **PostgreSQL** on localhost:5432 (infrastructure - for debugging/admin access)
-- **MongoDB Replica Set** on localhost:27017/27018/27019 (infrastructure - for debugging/admin access)
-- **Redis** on localhost:6379 (infrastructure - for debugging/admin access)
-- **RabbitMQ** on localhost:5672 (management UI: http://localhost:15672 - for monitoring)
+- **PostgreSQL** (internal only - use `docker compose exec postgres_db psql -U rllabs -d model_catalog_db` for debugging)
+- **MongoDB Replica Set** (internal only - use `docker compose exec mongo1 mongosh --port 27017` for debugging)
+- **Redis** (internal only - use `docker compose exec redis_cache redis-cli` for debugging)
+- **RabbitMQ** (internal only - use `docker compose exec rabbitmq_messaging rabbitmq-diagnostics status` for debugging)
 - **MinIO** on http://localhost:9000 (console: http://localhost:9001 - required for presigned URLs)
 
 **Note**: The frontend is included in docker-compose and will be available at http://localhost:5173 after the build completes. For development with hot reload, the frontend uses Vite's dev server.
@@ -368,6 +368,8 @@ kubectl delete -k kubernetes
 - Both deployments support the same API endpoints through the API Gateway
 - All manual tests from the README work identically in both environments
 - Use `python3 scripts/run_manual_tests.py` to verify functionality in either environment
+- The script automatically detects Docker Compose or Kubernetes and runs appropriate checks
+- **All 14 tests passing**: Health checks, JWT tokens, model CRUD, uploads/downloads, training service, RabbitMQ connectivity, and more
 
 ### Running Tests
 
@@ -1400,20 +1402,54 @@ Model Catalog → Publish ModelCreated event
 10. Upload/Download Service registers new model version with Model Catalog
 11. Trained model is available as new version of original model
 
-**RabbitMQ Management UI:**
+**Accessing Infrastructure Services for Debugging:**
 
 **Docker Compose:**
-- URL: http://localhost:15672
-- Username: `admin`
-- Password: `admin_password`
-- Use to monitor queues, exchanges, and message flow
+- Infrastructure services (PostgreSQL, Redis, RabbitMQ, MongoDB) are **not exposed** to the host network for security
+- Use `docker compose exec` to access services:
+  ```bash
+  # PostgreSQL
+  docker compose exec postgres_db psql -U rllabs -d model_catalog_db
+  
+  # Redis
+  docker compose exec redis_cache redis-cli
+  
+  # RabbitMQ (CLI)
+  docker compose exec rabbitmq_messaging rabbitmq-diagnostics status
+  docker compose exec rabbitmq_messaging rabbitmqctl list_queues
+  
+  # MongoDB
+  docker compose exec mongo1 mongosh --port 27017
+  ```
+- Helper scripts available in `scripts/`:
+  - `./scripts/access_postgres.sh`
+  - `./scripts/access_redis.sh`
+  - `./scripts/access_rabbitmq_ui.sh` (for Management UI port info)
+  - `./scripts/access_mongodb.sh`
+- **MinIO** remains exposed at http://localhost:9000 (required for presigned URLs)
 
 **Kubernetes/Kind:**
-- Requires port-forward: `kubectl port-forward service/rabbitmq 15672:15672`
-- Then access: http://localhost:15672
-- Username: `admin`
-- Password: `admin_password`
-- Use to monitor queues, exchanges, and message flow
+- Infrastructure services use ClusterIP (internal only)
+- Use `kubectl port-forward` for temporary access:
+  ```bash
+  # PostgreSQL
+  kubectl port-forward svc/postgres-primary 5432:5432
+  
+  # Redis
+  kubectl port-forward svc/redis 6379:6379
+  
+  # RabbitMQ Management UI
+  kubectl port-forward svc/rabbitmq 15672:15672
+  # Then access: http://localhost:15672 (admin/admin_password)
+  
+  # MongoDB
+  kubectl port-forward svc/mongodb 27017:27017
+  ```
+- Or use `kubectl exec` for direct access:
+  ```bash
+  kubectl exec -it postgres-primary-0 -- psql -U rllabs -d model_catalog_db
+  kubectl exec -it redis-master-0 -- redis-cli
+  ```
 
 ## Kubernetes Deployment
 

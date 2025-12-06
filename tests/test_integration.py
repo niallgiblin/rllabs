@@ -13,12 +13,12 @@ import pytest
 import requests
 
 GATEWAY_URL = "http://localhost:8080"
-GATEWAY_URL = "http://localhost:8080"
 # All services accessed through API Gateway (security best practice)
-RABBITMQ_HOST = "localhost"
-RABBITMQ_PORT = 5672
-RABBITMQ_USER = "admin"
-RABBITMQ_PASS = "admin_password"
+# RabbitMQ connection handled by rabbitmq_helpers to support both docker-compose and kubernetes
+import sys
+import os
+sys.path.insert(0, os.path.dirname(__file__))
+from rabbitmq_helpers import get_rabbitmq_connection_or_skip
 
 # Must match jwt_auth.py for local dev
 SECRET_KEY = "your-secret-key"
@@ -95,59 +95,36 @@ def test_create_and_version_via_gateway():
 
 def test_rabbitmq_connectivity():
     """Test RabbitMQ is accessible"""
-    try:
-        credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASS)
-        connection = pika.BlockingConnection(
-            pika.ConnectionParameters(
-                host=RABBITMQ_HOST,
-                port=RABBITMQ_PORT,
-                credentials=credentials
-            )
-        )
-        connection.close()
-        assert True
-    except Exception as e:
-        pytest.skip(f"RabbitMQ not available: {e}")
+    connection = get_rabbitmq_connection_or_skip()
+    connection.close()
+    assert True
 
 def test_model_created_event_published():
     """Test that ModelCreated event is published to RabbitMQ when model is created"""
     # Setup RabbitMQ consumer
-    try:
-        credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASS)
-        connection = pika.BlockingConnection(
-            pika.ConnectionParameters(
-                host=RABBITMQ_HOST,
-                port=RABBITMQ_PORT,
-                credentials=credentials,
-                connection_attempts=3,
-                retry_delay=1
-            )
-        )
-        channel = connection.channel()
-        
-        # Declare exchange
-        channel.exchange_declare(
-            exchange='model_events',
-            exchange_type='topic',
-            durable=True
-        )
-        
-        # Create temporary queue
-        result = channel.queue_declare(queue='test-events', exclusive=True)
-        queue_name = result.method.queue
-        
-        # Bind to model.created events
-        channel.queue_bind(
-            exchange='model_events',
-            queue=queue_name,
-            routing_key='model.created'
-        )
-        
-        # Purge any existing messages
-        channel.queue_purge(queue_name)
-        
-    except Exception as e:
-        pytest.skip(f"RabbitMQ not available: {e}")
+    connection = get_rabbitmq_connection_or_skip()
+    channel = connection.channel()
+    
+    # Declare exchange
+    channel.exchange_declare(
+        exchange='model_events',
+        exchange_type='topic',
+        durable=True
+    )
+    
+    # Create temporary queue
+    result = channel.queue_declare(queue='test-events', exclusive=True)
+    queue_name = result.method.queue
+    
+    # Bind to model.created events
+    channel.queue_bind(
+        exchange='model_events',
+        queue=queue_name,
+        routing_key='model.created'
+    )
+    
+    # Purge any existing messages
+    channel.queue_purge(queue_name)
     
     # Create a model - try gateway first, fallback to direct catalog
     unique_name = f"event-test-{int(time.time())}-{os.urandom(2).hex()}"
@@ -235,42 +212,29 @@ def test_rabbitmq_graceful_degradation():
 def test_rabbitmq_artifact_event():
     """Test that ArtifactCommitted events are published to RabbitMQ"""
     # Setup RabbitMQ consumer for artifact events
-    try:
-        credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASS)
-        connection = pika.BlockingConnection(
-            pika.ConnectionParameters(
-                host=RABBITMQ_HOST,
-                port=RABBITMQ_PORT,
-                credentials=credentials,
-                connection_attempts=3,
-                retry_delay=1
-            )
-        )
-        channel = connection.channel()
-        
-        # Declare artifact_events exchange
-        channel.exchange_declare(
-            exchange='artifact_events',
-            exchange_type='topic',
-            durable=True
-        )
-        
-        # Create temporary queue
-        result = channel.queue_declare(queue='test-artifact-events', exclusive=True)
-        queue_name = result.method.queue
-        
-        # Bind to artifact.committed events
-        channel.queue_bind(
-            exchange='artifact_events',
-            queue=queue_name,
-            routing_key='artifact.committed'
-        )
-        
-        # Purge any existing messages
-        channel.queue_purge(queue_name)
-        
-    except Exception as e:
-        pytest.skip(f"RabbitMQ not available: {e}")
+    connection = get_rabbitmq_connection_or_skip()
+    channel = connection.channel()
+    
+    # Declare artifact_events exchange
+    channel.exchange_declare(
+        exchange='artifact_events',
+        exchange_type='topic',
+        durable=True
+    )
+    
+    # Create temporary queue
+    result = channel.queue_declare(queue='test-artifact-events', exclusive=True)
+    queue_name = result.method.queue
+    
+    # Bind to artifact.committed events
+    channel.queue_bind(
+        exchange='artifact_events',
+        queue=queue_name,
+        routing_key='artifact.committed'
+    )
+    
+    # Purge any existing messages
+    channel.queue_purge(queue_name)
     
     # Publish a test artifact event (simulating upload completion)
     # In a real scenario, this would come from the upload service

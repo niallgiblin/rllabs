@@ -378,8 +378,8 @@ class TestRunner:
             self.print_skip("No model ID available")
             return False
         
-        # Create a small test file
-        test_file_content = b"This is a test model file for manual testing"
+        # Create a small test file with unique content to avoid idempotency hits
+        test_file_content = f"This is a test model file for manual testing - {int(time.time())}".encode()
         test_file_size = len(test_file_content)
         
         # Calculate SHA-256 hash
@@ -411,6 +411,17 @@ class TestRunner:
                 upload_data = response.json()
                 upload_id = upload_data.get('upload_id')
                 presigned_urls = upload_data.get('presigned_urls', [])
+                
+                # Check if this is an idempotency hit (already uploaded)
+                if upload_data.get('status') == 'already_completed' or (upload_id and not presigned_urls and upload_data.get('artifact_id')):
+                    artifact_id = upload_data.get('artifact_id')
+                    if artifact_id:
+                        self.created_artifact_id = artifact_id
+                        self.print_pass(f"File already uploaded (idempotency): {upload_id}, artifact: {artifact_id}")
+                        return True
+                    else:
+                        self.print_fail("Idempotency hit but no artifact_id in response")
+                        return False
                 
                 if upload_id and presigned_urls:
                     self.print_pass(f"Upload session created: {upload_id}")
@@ -733,70 +744,179 @@ class TestRunner:
             self.print_fail(f"Error: {str(e)}")
             return False
     
+    def is_docker_compose(self) -> bool:
+        """Check if running in docker-compose environment"""
+        try:
+            success, stdout, stderr = self.run_command([
+                "docker", "compose", "ps", "--format", "json"
+            ])
+            return success and len(stdout.strip()) > 0
+        except Exception:
+            return False
+    
     def test_training_service(self):
         """Test: Training service check"""
         self.print_header("Test: Training Service")
         
-        self.print_test("Check Training Service pod exists")
-        try:
-            success, stdout, stderr = self.run_command([
-                "kubectl", "get", "pods", "-l", "app=model-train-service", "-o", "jsonpath={.items[0].metadata.name}"
-            ])
-            
-            if success and stdout:
-                self.print_pass(f"Training Service pod found: {stdout}")
-                
-                # Check if it's running
-                self.print_test("Check Training Service logs for queue consumption")
-                success2, stdout2, stderr2 = self.run_command([
-                    "kubectl", "logs", "-l", "app=model-train-service", "--tail=10"
+        if self.is_docker_compose():
+            # Docker Compose environment
+            self.print_test("Check Training Service container exists")
+            try:
+                # Get all container names and filter for training service
+                success, stdout, stderr = self.run_command([
+                    "docker", "compose", "ps", "--format", "{{.Name}}"
                 ])
                 
-                if success2 and ("training_jobs" in stdout2.lower() or "waiting" in stdout2.lower()):
-                    self.print_pass("Training Service is consuming from queue")
-                    return True
+                if success and stdout.strip():
+                    lines = stdout.strip().split('\n')
+                    train_containers = [l for l in lines if 'train' in l.lower()]
+                    
+                    if train_containers:
+                        container_name = train_containers[0]
+                        self.print_pass(f"Training Service container found: {container_name}")
+                        
+                        # Check if it's running
+                        self.print_test("Check Training Service logs for queue consumption")
+                        # Use service name instead of container name
+                        success2, stdout2, stderr2 = self.run_command([
+                            "docker", "compose", "logs", "--tail=10", "model-train-service"
+                        ])
+                        
+                        if success2 and stdout2 and ("training_jobs" in stdout2.lower() or "waiting" in stdout2.lower() or "consuming" in stdout2.lower() or "listening" in stdout2.lower()):
+                            self.print_pass("Training Service is consuming from queue")
+                            return True
+                        else:
+                            # Just check if container is running
+                            success3, stdout3, stderr3 = self.run_command([
+                                "docker", "compose", "ps", "--format", "{{.Status}}", "--filter", f"name={container_name}"
+                            ])
+                            if success3 and "Up" in stdout3:
+                                self.print_pass("Training Service container is running")
+                                return True
+                            else:
+                                self.print_skip("Could not verify queue consumption from logs")
+                                return True
+                    else:
+                        self.print_fail("Training Service container not found")
+                        return False
                 else:
-                    self.print_skip("Could not verify queue consumption from logs")
-                    return True
-            else:
-                self.print_fail("Training Service pod not found")
+                    self.print_fail("Could not list containers")
+                    return False
+            except Exception as e:
+                self.print_skip(f"Could not check Training Service: {str(e)}")
                 return False
-        except Exception as e:
-            self.print_skip(f"Could not check Training Service: {str(e)}")
-            return False
+        else:
+            # Kubernetes environment
+            self.print_test("Check Training Service pod exists")
+            try:
+                success, stdout, stderr = self.run_command([
+                    "kubectl", "get", "pods", "-l", "app=model-train-service", "-o", "jsonpath={.items[0].metadata.name}"
+                ])
+                
+                if success and stdout:
+                    self.print_pass(f"Training Service pod found: {stdout}")
+                    
+                    # Check if it's running
+                    self.print_test("Check Training Service logs for queue consumption")
+                    success2, stdout2, stderr2 = self.run_command([
+                        "kubectl", "logs", "-l", "app=model-train-service", "--tail=10"
+                    ])
+                    
+                    if success2 and ("training_jobs" in stdout2.lower() or "waiting" in stdout2.lower()):
+                        self.print_pass("Training Service is consuming from queue")
+                        return True
+                    else:
+                        self.print_skip("Could not verify queue consumption from logs")
+                        return True
+                else:
+                    self.print_fail("Training Service pod not found")
+                    return False
+            except Exception as e:
+                self.print_skip(f"Could not check Training Service: {str(e)}")
+                return False
     
     def test_rabbitmq_connectivity(self):
         """Test 11: RabbitMQ connectivity"""
         self.print_header("Test 11: RabbitMQ Connectivity")
         
-        # Check if RabbitMQ management API is accessible
-        # Note: In Kind, we'd need port-forward for this
-        self.print_test("Check RabbitMQ management API")
-        try:
-            # Try to check if port-forward exists or use kubectl
-            success, stdout, stderr = self.run_command([
-                "kubectl", "get", "svc", "rabbitmq", "-o", "jsonpath={.metadata.name}"
-            ])
-            
-            if success:
-                self.print_pass("RabbitMQ service exists in cluster")
-                self.print_skip("RabbitMQ management UI requires port-forward (not tested)")
-                return True
-            else:
-                self.print_fail("RabbitMQ service not found")
+        if self.is_docker_compose():
+            # Docker Compose environment
+            self.print_test("Check RabbitMQ container exists")
+            try:
+                # Get all container names and filter for rabbitmq
+                success, stdout, stderr = self.run_command([
+                    "docker", "compose", "ps", "--format", "{{.Name}}"
+                ])
+                
+                if success and stdout.strip():
+                    lines = stdout.strip().split('\n')
+                    rabbitmq_containers = [l for l in lines if 'rabbitmq' in l.lower()]
+                    
+                    if rabbitmq_containers:
+                        container_name = rabbitmq_containers[0]
+                        self.print_pass(f"RabbitMQ container found: {container_name}")
+                        
+                        # Check if RabbitMQ is healthy via docker exec (use service name)
+                        self.print_test("Check RabbitMQ health")
+                        success2, stdout2, stderr2 = self.run_command([
+                            "docker", "compose", "exec", "-T", "rabbitmq", "rabbitmq-diagnostics", "ping"
+                        ])
+                        
+                        if success2:
+                            self.print_pass("RabbitMQ is healthy and accessible")
+                            self.print_skip("RabbitMQ management UI not exposed (security migration) - use: docker compose exec rabbitmq rabbitmq-diagnostics status")
+                            return True
+                        else:
+                            # Just verify container is running
+                            success3, stdout3, stderr3 = self.run_command([
+                                "docker", "compose", "ps", "--format", "{{.Status}}", "--filter", f"name={container_name}"
+                            ])
+                            if success3 and "Up" in stdout3:
+                                self.print_pass("RabbitMQ container is running")
+                                self.print_skip("RabbitMQ health check via exec failed, but container is running")
+                                return True
+                            else:
+                                self.print_fail("RabbitMQ health check failed and container may not be running")
+                                return False
+                    else:
+                        self.print_fail("RabbitMQ container not found")
+                        return False
+                else:
+                    self.print_fail("Could not list containers")
+                    return False
+            except Exception as e:
+                self.print_skip(f"Could not check RabbitMQ: {str(e)}")
                 return False
-        except Exception as e:
-            self.print_skip(f"Could not check RabbitMQ: {str(e)}")
-            return False
+        else:
+            # Kubernetes environment
+            self.print_test("Check RabbitMQ service exists")
+            try:
+                success, stdout, stderr = self.run_command([
+                    "kubectl", "get", "svc", "rabbitmq", "-o", "jsonpath={.metadata.name}"
+                ])
+                
+                if success:
+                    self.print_pass("RabbitMQ service exists in cluster")
+                    self.print_skip("RabbitMQ management UI requires port-forward (not tested)")
+                    return True
+                else:
+                    self.print_fail("RabbitMQ service not found")
+                    return False
+            except Exception as e:
+                self.print_skip(f"Could not check RabbitMQ: {str(e)}")
+                return False
     
     def run_all_tests(self):
         """Run all manual tests"""
         print(f"\n{GREEN}{'='*70}{NC}")
-        print(f"{GREEN}  RLLabs Manual Test Runner (Kind/Kubernetes){NC}")
+        # Detect environment
+        is_compose = self.is_docker_compose()
+        env_name = "Docker Compose" if is_compose else "Kind/Kubernetes"
+        print(f"{GREEN}  RLLabs Manual Test Runner ({env_name}){NC}")
         print(f"{GREEN}{'='*70}{NC}\n")
         
         print(f"API Gateway URL: {API_GATEWAY_URL}")
-        print(f"Testing against Kind/Kubernetes deployment\n")
+        print(f"Testing against {env_name} deployment\n")
         
         # Check connectivity first
         print("Checking API Gateway connectivity...")

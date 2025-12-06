@@ -16,10 +16,11 @@ import requests
 
 GATEWAY_URL = "http://localhost:8080"
 # All services accessed through API Gateway (security best practice)
-RABBITMQ_HOST = "localhost"
-RABBITMQ_PORT = 5672
-RABBITMQ_USER = "admin"
-RABBITMQ_PASS = "admin_password"
+# RabbitMQ connection handled by rabbitmq_helpers to support both docker-compose and kubernetes
+import sys
+import os
+sys.path.insert(0, os.path.dirname(__file__))
+from rabbitmq_helpers import get_rabbitmq_connection_or_skip
 
 # Must match jwt_auth.py for local dev
 SECRET_KEY = "your-secret-key"
@@ -430,42 +431,29 @@ def test_user_id_header_forwarded(auth_headers, auth_token):
 def test_rabbitmq_artifact_event_published(auth_headers, test_file, test_model_id):
     """Test that ArtifactCommitted event is published to RabbitMQ"""
     # Setup RabbitMQ consumer
-    try:
-        credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASS)
-        connection = pika.BlockingConnection(
-            pika.ConnectionParameters(
-                host=RABBITMQ_HOST,
-                port=RABBITMQ_PORT,
-                credentials=credentials,
-                connection_attempts=3,
-                retry_delay=1
-            )
-        )
-        channel = connection.channel()
-        
-        # Declare exchange
-        channel.exchange_declare(
-            exchange='artifact_events',
-            exchange_type='topic',
-            durable=True
-        )
-        
-        # Create temporary queue
-        result = channel.queue_declare(queue='test-artifact-events', exclusive=True)
-        queue_name = result.method.queue
-        
-        # Bind to artifact.committed events
-        channel.queue_bind(
-            exchange='artifact_events',
-            queue=queue_name,
-            routing_key='artifact.committed'
-        )
-        
-        # Purge any existing messages
-        channel.queue_purge(queue_name)
-        
-    except Exception as e:
-        pytest.skip(f"RabbitMQ not available: {e}")
+    connection = get_rabbitmq_connection_or_skip()
+    channel = connection.channel()
+    
+    # Declare exchange
+    channel.exchange_declare(
+        exchange='artifact_events',
+        exchange_type='topic',
+        durable=True
+    )
+    
+    # Create temporary queue
+    result = channel.queue_declare(queue='test-artifact-events', exclusive=True)
+    queue_name = result.method.queue
+    
+    # Bind to artifact.committed events
+    channel.queue_bind(
+        exchange='artifact_events',
+        queue=queue_name,
+        routing_key='artifact.committed'
+    )
+    
+    # Purge any existing messages
+    channel.queue_purge(queue_name)
     
     # Perform upload (simplified - just test event publishing)
     # In a real scenario, we'd complete a full upload workflow
@@ -956,33 +944,21 @@ class TestArtifactDownloadedEvent:
         import time
         
         # Setup RabbitMQ connection to listen for events
-        try:
-            credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASS)
-            connection = pika.BlockingConnection(
-                pika.ConnectionParameters(
-                    host=RABBITMQ_HOST,
-                    port=RABBITMQ_PORT,
-                    credentials=credentials,
-                    connection_attempts=3,
-                    retry_delay=1
-                )
-            )
-            channel = connection.channel()
-            
-            # Declare exchange
-            channel.exchange_declare(exchange='artifact_events', exchange_type='topic', durable=True)
-            
-            # Create temporary queue
-            result = channel.queue_declare(queue='', exclusive=True)
-            queue_name = result.method.queue
-            
-            # Bind to artifact.downloaded events
-            channel.queue_bind(exchange='artifact_events', queue=queue_name, routing_key='artifact.downloaded')
-            
-            # Purge any existing messages
-            channel.queue_purge(queue_name)
-        except Exception as e:
-            pytest.skip(f"RabbitMQ not available: {e}")
+        connection = get_rabbitmq_connection_or_skip()
+        channel = connection.channel()
+        
+        # Declare exchange
+        channel.exchange_declare(exchange='artifact_events', exchange_type='topic', durable=True)
+        
+        # Create temporary queue
+        result = channel.queue_declare(queue='', exclusive=True)
+        queue_name = result.method.queue
+        
+        # Bind to artifact.downloaded events
+        channel.queue_bind(exchange='artifact_events', queue=queue_name, routing_key='artifact.downloaded')
+        
+        # Purge any existing messages
+        channel.queue_purge(queue_name)
         
         # Upload a file first
         file_size = test_file.stat().st_size
@@ -1099,25 +1075,13 @@ class TestArtifactDownloadedEvent:
         import time
         
         # Setup RabbitMQ connection
-        try:
-            credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASS)
-            connection = pika.BlockingConnection(
-                pika.ConnectionParameters(
-                    host=RABBITMQ_HOST,
-                    port=RABBITMQ_PORT,
-                    credentials=credentials,
-                    connection_attempts=3,
-                    retry_delay=1
-                )
-            )
-            channel = connection.channel()
-            channel.exchange_declare(exchange='artifact_events', exchange_type='topic', durable=True)
-            result = channel.queue_declare(queue='', exclusive=True)
-            queue_name = result.method.queue
-            channel.queue_bind(exchange='artifact_events', queue=queue_name, routing_key='artifact.downloaded')
-            channel.queue_purge(queue_name)
-        except Exception as e:
-            pytest.skip(f"RabbitMQ not available: {e}")
+        connection = get_rabbitmq_connection_or_skip()
+        channel = connection.channel()
+        channel.exchange_declare(exchange='artifact_events', exchange_type='topic', durable=True)
+        result = channel.queue_declare(queue='', exclusive=True)
+        queue_name = result.method.queue
+        channel.queue_bind(exchange='artifact_events', queue=queue_name, routing_key='artifact.downloaded')
+        channel.queue_purge(queue_name)
         
         # Upload a file first (need auth for upload)
         auth_token = _make_jwt()

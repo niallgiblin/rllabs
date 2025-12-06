@@ -7,10 +7,10 @@
 #
 # INFRASTRUCTURE SERVICES SECURITY:
 # - PostgreSQL (5432), Redis (6379), RabbitMQ (5672/15672), MongoDB (27017-27019):
-#   * Exposed for development/debugging convenience
-#   * In production, these should NOT be exposed to external networks
-#   * Use network policies, firewalls, or VPN for secure access
-#   * These services are internal infrastructure and should only be accessible within the Docker network
+#   * NOT exposed to host network (aligned with Kubernetes security model)
+#   * Only accessible within Docker network via service names (e.g., postgres:5432)
+#   * For debugging: Use "docker compose exec <service> <command>" or create temporary port-forward
+#   * This matches production deployment patterns where services are cluster-internal only
 #   * Future: Implement mTLS for inter-service communication in production deployments
 #
 # - MinIO (9000/9001):
@@ -141,6 +141,8 @@ services:
       - ./model_train_service:/app
 
   # PostgreSQL Database for Model Catalog Service (Metadata) and Upload/Download
+  # SECURITY: Not exposed to host - accessible only within Docker network
+  # For debugging: docker compose exec postgres_db psql -U rllabs -d model_catalog_db
   postgres:
     image: postgres:13
     container_name: postgres_db
@@ -153,8 +155,7 @@ services:
       # With connection pools of 40 per pod, we need at least 300 connections
       # to account for multiple pods, read replicas, and system overhead
       POSTGRES_MAX_CONNECTIONS: "300"
-    ports:
-      - "5432:5432"
+    # No ports exposed - accessible only via internal Docker network
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./postgres-init/create-multiple-databases.sh:/docker-entrypoint-initdb.d/create-multiple-databases.sh
@@ -168,11 +169,12 @@ services:
       retries: 5
 
   # Redis for Caching and Rate Limiting
+  # SECURITY: Not exposed to host - accessible only within Docker network
+  # For debugging: docker compose exec redis_cache redis-cli
   redis:
     image: redis:7-alpine
     container_name: redis_cache
-    ports:
-      - "6379:6379"
+    # No ports exposed - accessible only via internal Docker network
     networks:
       - rllabs-network
     healthcheck:
@@ -182,15 +184,17 @@ services:
       retries: 5
 
   # RabbitMQ for Asynchronous Messaging
+  # SECURITY: Not exposed to host - accessible only within Docker network
+  # For debugging: 
+  #   - CLI: docker compose exec rabbitmq_messaging rabbitmq-diagnostics status
+  #   - Management UI: docker compose port rabbitmq 15672 (then access returned port)
   rabbitmq:
     image: rabbitmq:3-management-alpine
     container_name: rabbitmq_messaging
     environment:
       RABBITMQ_DEFAULT_USER: admin
       RABBITMQ_DEFAULT_PASS: admin_password
-    ports:
-      - "5672:5672"   # AMQP port
-      - "15672:15672" # Management UI
+    # No ports exposed - accessible only via internal Docker network
     # Volume temporarily removed due to macOS Docker Desktop permission issues
     # Uncomment below and remove volume if you need persistence:
     # volumes:
@@ -284,12 +288,13 @@ services:
   #     retries: 3
 
   # MongoDB Replica Set for Collaboration Service (CP Configuration)
+  # SECURITY: Not exposed to host - accessible only within Docker network
+  # For debugging: docker compose exec mongo1 mongosh --port 27017
   mongo1:
     image: mongo:7.0
     container_name: mongo1
     command: ["--replSet", "rs0", "--bind_ip_all", "--port", "27017"]
-    ports:
-      - "27017:27017"
+    # No ports exposed - accessible only via internal Docker network
     volumes:
       - mongo1_data:/data/db
       - mongo1_config:/data/configdb
@@ -307,8 +312,7 @@ services:
     image: mongo:7.0
     container_name: mongo2
     command: ["--replSet", "rs0", "--bind_ip_all", "--port", "27018"]
-    ports:
-      - "27018:27018"
+    # No ports exposed - accessible only via internal Docker network
     volumes:
       - mongo2_data:/data/db
       - mongo2_config:/data/configdb
@@ -321,8 +325,7 @@ services:
     image: mongo:7.0
     container_name: mongo3
     command: ["--replSet", "rs0", "--bind_ip_all", "--port", "27019"]
-    ports:
-      - "27019:27019"
+    # No ports exposed - accessible only via internal Docker network
     volumes:
       - mongo3_data:/data/db
       - mongo3_config:/data/configdb
