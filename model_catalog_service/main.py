@@ -472,6 +472,10 @@ async def register_model_version(
         )
         
         return db_version
+    except HTTPException as e:
+        # Re-raise HTTPExceptions (like duplicate version check) without modification
+        db.rollback()
+        raise e
     except IntegrityError as e:
         logger.warning(f"IntegrityError in register_model_version: {e}")
         db.rollback()

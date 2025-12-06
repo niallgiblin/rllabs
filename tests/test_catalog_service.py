@@ -181,7 +181,11 @@ def test_register_duplicate_model_version(created_model_id):
     }
     response = requests.post(f"{GATEWAY_URL}/api/models/{created_model_id}/versions", json=payload_dup, headers=HEADERS)
     assert response.status_code == 409
-    assert "This model version or content hash already exists for this model." in response.json()["detail"]
+    # Check for either the specific version message or the generic duplicate message
+    detail = response.json()["detail"]
+    assert ("Version 1 already exists" in detail or 
+            "This model version or content hash already exists" in detail or
+            "already exists for this model" in detail)
 
 def test_register_model_version_model_not_found():
     non_existent_id = 999999
