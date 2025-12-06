@@ -366,13 +366,21 @@ async def complete_upload(
         # Config and dataset artifacts are stored but not registered as model versions
         if artifact_type == "model" and result.get('model_id'):
             try:
-                await register_with_model_catalog(
+                # Model Catalog will calculate the correct version number automatically
+                catalog_result = await register_with_model_catalog(
                     model_id=result['model_id'],
-                    version=result['version'],
                     storage_path=result['storage_path'],
                     content_hash=result['artifact_id'],
                     user_id=user_id
                 )
+                # Update result with the version and storage_path assigned by Model Catalog
+                result['version'] = catalog_result['version']
+                result['storage_path'] = catalog_result['storage_path']
+                
+                # Update the session's storage_path in the database with the correct version
+                session.storage_path = catalog_result['storage_path']
+                db.commit()
+                
                 logger.info(f"Registered model artifact with Model Catalog: model_id={result['model_id']}, version={result['version']}")
                 result['registered_with_catalog'] = True
             except Exception as e:
@@ -396,6 +404,7 @@ async def complete_upload(
             logger.info(f"Skipping Model Catalog registration for {artifact_type} artifact (only model artifacts are registered as versions)")
             result['registered_with_catalog'] = False
             result['catalog_message'] = f"{artifact_type} artifacts are not registered as model versions"
+            result['version'] = None  # Explicitly set to None for non-model artifacts
         
         # ASYNCHRONOUS: Publish ArtifactUploaded event in background (best-effort, fail-open)
         # This is optional - if it fails, we log but don't fail the upload
@@ -406,7 +415,7 @@ async def complete_upload(
                     publisher.publish_artifact_uploaded(
                         artifact_id=result['artifact_id'],
                         model_id=result['model_id'],
-                        version=result['version'],
+                        version=result.get('version'),  # May be None for non-model artifacts
                         storage_path=result['storage_path'],
                         uploaded_by=user_id,
                         file_size=result['file_size'],
@@ -816,11 +825,10 @@ async def delete_artifact(
 
 async def register_with_model_catalog(
     model_id: int,
-    version: int,
     storage_path: str,
     content_hash: str,
     user_id: str
-):
+) -> dict:
     """
     Register a new model version with the Model Catalog Service
     
@@ -828,27 +836,30 @@ async def register_with_model_catalog(
     
     Architectural Decision: Direct HTTP call to Model Catalog
     - Trade-off: Tight coupling but strong consistency
-    - Model Catalog is the source of truth for model metadata
+    - Model Catalog is the source of truth for model metadata and version numbers
     - If Model Catalog is down, uploads will fail (prioritize consistency over availability)
     
     Uses global HTTP client with connection pooling for better performance.
     
     Args:
         model_id: ID of the parent model
-        version: Version number for this artifact
-        storage_path: S3 path where artifact is stored
+        storage_path: S3 path where artifact is stored (will be updated with correct version)
         content_hash: SHA-256 hash of the artifact
         user_id: User who uploaded the artifact
+    
+    Returns:
+        dict with 'version' (assigned version number) and 'storage_path' (updated path)
     
     Raises:
         Exception if Model Catalog call fails
     """
     client = get_model_catalog_client()
     try:
+        # Don't send version - let Model Catalog calculate it automatically
+        # This ensures sequential version numbering even if some uploads fail
         response = await client.post(
             f"{MODEL_CATALOG_URL}/models/{model_id}/versions",
             json={
-                "version": version,
                 "storage_path": storage_path,
                 "content_hash": content_hash
             },
@@ -858,7 +869,15 @@ async def register_with_model_catalog(
             }
         )
         response.raise_for_status()
-        logger.info(f"Successfully registered version {version} for model {model_id} with Model Catalog")
+        version_data = response.json()
+        assigned_version = version_data.get("version")
+        updated_storage_path = version_data.get("storage_path", storage_path)
+        logger.info(f"Successfully registered version {assigned_version} for model {model_id} with Model Catalog")
+        
+        return {
+            "version": assigned_version,
+            "storage_path": updated_storage_path
+        }
         
     except httpx.HTTPStatusError as e:
         logger.error(f"Model Catalog returned error: {e.response.status_code} - {e.response.text}")

@@ -468,30 +468,10 @@ class SessionManager:
             # Clean up temp file
             await self.storage.delete_object(temp_object_key)
             
-            # Determine version number for this model
-            # Get the highest version for this model and increment
-            from sqlalchemy import func
-            max_version = self.db.query(
-                func.max(UploadSession.storage_path)
-            ).filter(
-                and_(
-                    UploadSession.model_id == session.model_id,
-                    UploadSession.status == UploadStatus.COMPLETED
-                )
-            ).scalar()
-            
-            # Extract version from storage_path (format: "models/{model_id}/v{version}")
-            # For simplicity, we'll use a counter starting at 1
-            # In production, sync with Model Catalog for version numbers
-            existing_versions = self.db.query(UploadSession).filter(
-                and_(
-                    UploadSession.model_id == session.model_id,
-                    UploadSession.status == UploadStatus.COMPLETED
-                )
-            ).count()
-            
-            version = existing_versions + 1
-            storage_path = f"models/{session.model_id}/v{version}"
+            # Determine storage path for this model
+            # Version number will be calculated by Model Catalog when we register
+            # For now, use a temporary path - it will be updated with correct version after Model Catalog registration
+            storage_path = f"models/{session.model_id}/temp"  # Temporary, will be updated with correct version
             
             # Update session
             session.status = UploadStatus.COMPLETED
@@ -506,7 +486,7 @@ class SessionManager:
                 "status": "completed",
                 "storage_path": storage_path,
                 "model_id": session.model_id,
-                "version": version,
+                "version": None,  # Will be assigned by Model Catalog
                 "filename": session.filename,
                 "file_size": session.file_size
             }

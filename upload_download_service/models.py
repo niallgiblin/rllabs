@@ -79,13 +79,16 @@ class UploadCompleteResponse(BaseModel):
     
     artifact_id is the content hash (sha256:...) which serves as
     the permanent identifier for this artifact.
+    
+    Note: version is only set for model artifacts that are registered with Model Catalog.
+    Config and dataset artifacts don't have version numbers.
     """
     artifact_id: str = Field(..., description="Content hash (sha256:...)")
     status: str = Field(default="completed", description="Upload status")
     storage_path: str = Field(..., description="S3 path where artifact is stored")
     registered_with_catalog: bool = Field(default=True, description="Whether registered with Model Catalog")
     model_id: int = Field(..., description="Parent model ID")
-    version: int = Field(..., description="Version number assigned")
+    version: Optional[int] = Field(None, description="Version number assigned (only for model artifacts registered with Model Catalog)")
     filename: str = Field(..., description="Original filename")
     file_size: int = Field(..., description="File size in bytes")
 

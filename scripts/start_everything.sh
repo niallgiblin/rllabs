@@ -570,7 +570,9 @@ else
     echo -e "  ${YELLOW}⚠️  Frontend service not found. Skipping...${NC}"
 fi
 
-# Set up port-forward for MinIO (needed for file uploads via presigned URLs)
+# Set up port-forward for MinIO (REQUIRED for presigned URLs - clients need direct access)
+# Security: Authorization happens BEFORE presigned URL generation at API Gateway/Upload Service
+# MinIO port-forward is safe because only authorized users get presigned URLs (time-limited, 1hr expiry)
 echo ""
 if kubectl get svc minio >/dev/null 2>&1; then
     cleanup_port_forward "minio" "9000"
@@ -596,15 +598,27 @@ else
 fi
 
 echo ""
+echo -e "${BLUE}Note: Upload/Download Service${NC}"
+echo "  Upload/Download Service is accessed through the API Gateway (port 8080)"
+echo "  No direct port-forward needed - use: http://localhost:8080/api/uploads"
+echo "  For ingress: http://api.localhost/api/uploads"
+echo ""
+echo -e "${BLUE}Security Architecture:${NC}"
+echo "  ✓ All API requests go through API Gateway (authentication, rate limiting)"
+echo "  ✓ Authorization happens BEFORE presigned URL generation"
+echo "  ✓ MinIO port-forward is REQUIRED for presigned URLs (clients need direct access)"
+echo "  ✓ Presigned URLs are time-limited (1 hour) and part-specific (secure)"
+echo ""
 echo "───────────────────────────────────────────────────────────────"
 echo -e "${GREEN}Observability Services Access${NC}"
 echo "───────────────────────────────────────────────────────────────"
 echo ""
 echo "Access the following services:"
 echo ""
-echo "  🌐 Frontend:     http://localhost:5173"
-echo "  🔌 API Gateway:  http://localhost:8080"
-echo "  📦 MinIO:        http://localhost:9000 (for file uploads)"
+echo "  🌐 Frontend:     http://localhost:5173 (or via ingress)"
+echo "  🔌 API Gateway:  http://localhost:8080 (or via ingress: http://api.localhost)"
+echo "  📦 MinIO:        http://localhost:9000 (port-forward) or http://minio.localhost (ingress)"
+echo "  📤 Upload/Download: Via API Gateway at http://localhost:8080/api/uploads"
 echo "  📊 Grafana:      http://localhost:3000 (admin/admin)"
 echo "  📈 Prometheus:   http://localhost:9090"
 echo "  🔍 Jaeger:       http://localhost:16686"

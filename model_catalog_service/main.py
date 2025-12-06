@@ -92,8 +92,10 @@ class ModelVersionBase(BaseModel):
     storage_path: str
     content_hash: str
 
-class ModelVersionCreate(ModelVersionBase):
-    pass
+class ModelVersionCreate(BaseModel):
+    version: Optional[int] = None  # Optional - will be auto-calculated if not provided
+    storage_path: str
+    content_hash: str
 
 class ModelVersion(ModelVersionBase):
     id: int
@@ -394,11 +396,13 @@ async def register_model_version(
     3. Model Catalog creates a new version record
     
     The version number is automatically assigned based on existing versions for the model.
+    If version is provided, it will be used (for backward compatibility), but it's recommended
+    to let Model Catalog calculate it automatically to ensure sequential numbering.
     Content hash (SHA-256) is used for deduplication - same hash cannot be registered twice.
     
     Args:
         model_id: ID of the parent model
-        version_data: Version information (version number, storage_path, content_hash)
+        version_data: Version information (version number optional, storage_path, content_hash)
         user_id: User ID from API Gateway (optional, for audit logging)
     
     Returns:
@@ -413,7 +417,32 @@ async def register_model_version(
         raise HTTPException(status_code=404, detail="Model not found")
 
     try:
-        db_version = database.ModelVersion(**version_data.model_dump(), model_id=model_id)
+        # Calculate next version number if not provided
+        # Model Catalog is the source of truth for version numbers
+        version = version_data.version
+        if version is None:
+            from sqlalchemy import func
+            max_version = db.query(func.max(database.ModelVersion.version)).filter(
+                database.ModelVersion.model_id == model_id
+            ).scalar()
+            version = (max_version or 0) + 1
+            logger.info(f"Auto-calculated version {version} for model {model_id} (max existing: {max_version})")
+        else:
+            # Version provided - verify it doesn't already exist
+            existing = db.query(database.ModelVersion).filter(
+                database.ModelVersion.model_id == model_id,
+                database.ModelVersion.version == version
+            ).first()
+            if existing:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Version {version} already exists for this model"
+                )
+        
+        # Create version record with calculated version
+        version_dict = version_data.model_dump()
+        version_dict['version'] = version
+        db_version = database.ModelVersion(**version_dict, model_id=model_id)
         db.add(db_version)
         db.commit()
         db.refresh(db_version)
