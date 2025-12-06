@@ -56,8 +56,18 @@ RABBITMQ_DLQ = f"{RABBITMQ_QUEUE}_dlq"
 NUM_EPISODES = int(os.getenv("NUM_EPISODES", "50"))
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
 
+# Detect if running in Kubernetes (KUBERNETES_SERVICE_HOST is automatically set in K8s pods)
+IS_KUBERNETES = os.getenv("KUBERNETES_SERVICE_HOST") is not None
+# MinIO endpoint replacement: in Kubernetes, replace localhost with internal service name
+MINIO_INTERNAL_ENDPOINT = os.getenv("MINIO_INTERNAL_ENDPOINT", "minio:9000")
+
 # Redis configuration for job status tracking
-REDIS_HOST = os.getenv("REDIS_HOST", "redis-master")
+# Auto-detect environment: Kubernetes uses redis-master, Docker Compose uses redis
+# Detect if running in Kubernetes (KUBERNETES_SERVICE_HOST is automatically set in K8s pods)
+IS_KUBERNETES = os.getenv("KUBERNETES_SERVICE_HOST") is not None
+# Use appropriate default based on environment
+_DEFAULT_REDIS_HOST = "redis-master" if IS_KUBERNETES else "redis"
+REDIS_HOST = os.getenv("REDIS_HOST", _DEFAULT_REDIS_HOST)
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
 REDIS_SENTINEL_HOSTS = os.getenv("REDIS_SENTINEL_HOSTS", "")
@@ -70,9 +80,18 @@ _http_client_lock = threading.Lock()
 def get_http_client() -> httpx.AsyncClient:
     """Get or create global HTTP client with connection pooling"""
     global _http_client
-    if _http_client is None:
+    # Check if client exists and is not closed
+    if _http_client is None or _http_client.is_closed:
         with _http_client_lock:
-            if _http_client is None:
+            # Double-check after acquiring lock
+            if _http_client is None or _http_client.is_closed:
+                # Close old client if it exists but is closed
+                if _http_client is not None:
+                    try:
+                        # Don't await here - just mark for cleanup
+                        pass
+                    except Exception:
+                        pass
                 _http_client = httpx.AsyncClient(
                     timeout=httpx.Timeout(60.0, connect=10.0),
                     limits=httpx.Limits(
@@ -582,10 +601,14 @@ class ArtifactDownloader:
             headers["X-User-Id"] = self.user_id
         
         try:
+            # Always request internal endpoint URL for service-to-service access
+            # In both Docker Compose and Kubernetes, services need minio:9000 (not localhost:9000)
+            # localhost:9000 only works for browsers running on the host machine
+            params = {"expires_in": 3600, "internal": "true"}
             response = await self._download_with_circuit_breaker(
                 f"{self.service_url}/downloads/{artifact_id}",
                 headers=headers,
-                params={"expires_in": 3600}
+                params=params
             )
         except CircuitBreakerError:
             logger.error(
@@ -603,11 +626,15 @@ class ArtifactDownloader:
         download_info = response.json()
         presigned_url = download_info["download_url"]
         
+        # No need to replace hostname - URL is already generated with correct endpoint
+        # (internal endpoint since internal=true was requested)
+        
         logger.info(
             f"Got presigned URL",
             extra={
                 "artifact_id": artifact_id,
-                "expires_at": download_info.get("expires_at")
+                "expires_at": download_info.get("expires_at"),
+                "url_preview": presigned_url[:100]  # Log URL preview for debugging
             }
         )
         
@@ -658,10 +685,14 @@ class ArtifactDownloader:
             headers["X-User-Id"] = self.user_id
         
         try:
+            # Always request internal endpoint URL for service-to-service access
+            # In both Docker Compose and Kubernetes, services need minio:9000 (not localhost:9000)
+            # localhost:9000 only works for browsers running on the host machine
+            params = {"expires_in": 3600, "internal": "true"}
             response = await self._download_with_circuit_breaker(
                 f"{self.service_url}/downloads/{artifact_id}",
                 headers=headers,
-                params={"expires_in": 3600}
+                params=params
             )
         except CircuitBreakerError:
             logger.error(
@@ -679,6 +710,9 @@ class ArtifactDownloader:
         download_info = response.json()
         presigned_url = download_info["download_url"]
         file_size = download_info.get("file_size", 0)
+        
+        # No need to replace hostname - URL is already generated with correct endpoint
+        # (internal endpoint since internal=true was requested)
         
         logger.info(
             f"Downloading model file",
@@ -749,14 +783,20 @@ class ArtifactDownloader:
         if self.user_id:
             headers["X-User-Id"] = self.user_id
         
+        # Always request internal endpoint URL for service-to-service access
+        # In both Docker Compose and Kubernetes, services need minio:9000 (not localhost:9000)
+        # localhost:9000 only works for browsers running on the host machine
+        params = {"expires_in": 3600, "internal": "true"}
         response = await client.get(
             f"{self.service_url}/downloads/{artifact_id}",
             headers=headers,
-            params={"expires_in": 3600}
+            params=params
         )
         response.raise_for_status()
         
         presigned_url = response.json()["download_url"]
+        
+        # No need to replace hostname - URL is already generated with internal endpoint
         
         file_response = await client.get(presigned_url)
         file_response.raise_for_status()
@@ -828,8 +868,10 @@ class ArtifactUploader:
         client = get_http_client()
         headers = {"X-User-Id": self.user_id}
         
+        # Request internal endpoint URLs for service-to-service access
+        # In both Docker Compose and Kubernetes, services need minio:9000 (not localhost:9000)
         init_response = await client.post(
-            f"{self.service_url}/uploads",
+            f"{self.service_url}/uploads?internal=true",
             json={
                 "filename": filename,
                 "file_size": file_size,
@@ -851,7 +893,7 @@ class ArtifactUploader:
             extra={
                 "upload_id": upload_id,
                 "chunk_count": len(presigned_urls),
-                "filename": filename
+                "file_name": filename  # Changed from 'filename' to avoid LogRecord conflict
             }
         )
         
@@ -1004,9 +1046,15 @@ class TrainingJobHandler:
             for name, artifact_id in artifact_ids:
                 try:
                     # Check existence without downloading (HEAD request)
+                    # For training jobs, we allow using artifacts if user has access to the training job's model
+                    # Pass model_id as query parameter to allow cross-model artifact usage for training
+                    params = {}
+                    if model_id:
+                        params["model_id"] = model_id  # Allow access if user has access to training job's model
                     response = await client.head(
                         f"{UPLOAD_DOWNLOAD_SERVICE_URL}/downloads/{artifact_id}",
-                        headers={"X-User-Id": user_id}
+                        headers={"X-User-Id": user_id},
+                        params=params
                     )
                     if response.status_code != 200:
                         error_msg = f"{name} artifact not found: {artifact_id}"
@@ -1273,9 +1321,22 @@ def on_message_callback(ch, method, properties, body, handler: TrainingJobHandle
         # Note: Callback blocks until job completes, but with prefetch_count=3,
         # RabbitMQ can deliver multiple messages for concurrent processing.
         # The async I/O operations inside process_training_job() allow concurrent downloads/uploads.
-        # Using asyncio.run() is fine here - it creates a new event loop for this thread.
+        # Using asyncio.run() creates a new event loop for this thread.
+        # IMPORTANT: httpx.AsyncClient must be created in the same event loop where it's used.
+        # We reset the global client before each asyncio.run() to ensure it's created in the
+        # correct event loop context.
         import asyncio
-        asyncio.run(handler.process_training_job(message))
+        # Reset HTTP client before creating new event loop
+        # This ensures the client is created fresh in the new loop's context
+        global _http_client
+        with _http_client_lock:
+            _http_client = None  # Force recreation in new event loop
+        try:
+            asyncio.run(handler.process_training_job(message))
+        finally:
+            # Clean up: reset client after loop closes to ensure fresh client for next job
+            with _http_client_lock:
+                _http_client = None
         
         # Acknowledge message on success
         ch.basic_ack(delivery_tag=method.delivery_tag)

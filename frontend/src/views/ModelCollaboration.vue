@@ -531,6 +531,19 @@ const trainingForm = ref({
 const creatingJob = ref(false)
 const trainingError = ref(null)
 
+// Helper to normalize artifact IDs (add sha256: prefix if missing)
+const normalizeArtifactId = (id) => {
+  if (!id) return id
+  // Already has prefix
+  if (id.startsWith('sha256:')) return id
+  // Valid 64-char hex - add prefix
+  if (/^[a-f0-9]{64}$/i.test(id.trim())) {
+    return `sha256:${id.trim()}`
+  }
+  // Return as-is (backend will validate)
+  return id
+}
+
 const handleCreateTrainingJob = async () => {
   if (!model.value) return
   
@@ -548,10 +561,15 @@ const handleCreateTrainingJob = async () => {
       throw new Error('No model artifact ID available. Please upload a model version first.')
     }
     
+    // Normalize all artifact IDs before sending to API
+    const configId = normalizeArtifactId(trainingForm.value.configArtifactId)
+    const datasetId = normalizeArtifactId(trainingForm.value.datasetArtifactId)
+    const normalizedModelId = normalizeArtifactId(modelArtifactId)
+    
     const job = await trainingApi.createJob({
-      config_artifact_id: trainingForm.value.configArtifactId,
-      dataset_artifact_id: trainingForm.value.datasetArtifactId,
-      model_artifact_id: modelArtifactId,
+      config_artifact_id: configId,
+      dataset_artifact_id: datasetId,
+      model_artifact_id: normalizedModelId,
       model_id: model.value.id
     })
     
@@ -641,7 +659,12 @@ const handleDownloadVersion = async (version) => {
     }
     
     let downloadUrl = downloadData.download_url
-    downloadUrl = downloadUrl.replace(/http:\/\/minio:9000/g, 'http://localhost:9000')
+    // Replace internal service names with localhost for browser access
+    // This handles cases where backend generates URLs with internal service names
+    // Browser always needs localhost (or external hostname) since it runs on the host
+    if (downloadUrl.includes('minio:9000')) {
+      downloadUrl = downloadUrl.replace(/http:\/\/minio:9000/g, 'http://localhost:9000')
+    }
     
     window.open(downloadUrl, '_blank')
   } catch (err) {
@@ -708,10 +731,13 @@ const handleDownload = async () => {
       throw new Error('Invalid download response from server. Please try again.')
     }
     
-    // Replace Docker internal hostname with localhost for browser access
-    // Backend should generate URLs with localhost:9000, but this is a fallback
+    // Replace internal service names with localhost for browser access
+    // This handles cases where backend generates URLs with internal service names
+    // Browser always needs localhost (or external hostname) since it runs on the host
     let downloadUrl = downloadData.download_url
-    downloadUrl = downloadUrl.replace(/http:\/\/minio:9000/g, 'http://localhost:9000')
+    if (downloadUrl.includes('minio:9000')) {
+      downloadUrl = downloadUrl.replace(/http:\/\/minio:9000/g, 'http://localhost:9000')
+    }
     
     // Open download URL in new tab
     console.log('Opening download URL:', downloadUrl)

@@ -216,7 +216,8 @@ class SessionManager:
         chunk_size: int,
         artifact_type: str,
         model_id: int,
-        user_id: str
+        user_id: str,
+        use_internal_endpoint: bool = False
     ) -> UploadSession:
         """
         Create a new upload session with presigned URLs
@@ -264,7 +265,8 @@ class SessionManager:
                 object_key=temp_object_key,
                 upload_id=minio_upload_id,
                 part_number=part_num,
-                expires_in=3600  # 1 hour
+                expires_in=3600,  # 1 hour
+                use_internal_endpoint=use_internal_endpoint
             )
             return PresignedURL(
                 part_number=part_num,

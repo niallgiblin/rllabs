@@ -29,7 +29,8 @@ logger = logging.getLogger(__name__)
 async def check_download_permission(
     db: Session,
     user_id: Optional[str],
-    artifact_id: str
+    artifact_id: str,
+    training_model_id: Optional[int] = None
 ) -> Tuple[bool, Optional[str]]:
     """
     Check if user has permission to download an artifact.
@@ -107,8 +108,18 @@ async def check_download_permission(
         ).first()
         
         if not session:
-            # Artifact doesn't exist in our records
-            # This means the artifact was never uploaded through our system
+            # No upload session found, but artifact might exist in storage (e.g., uploaded to different model)
+            # For training jobs, if training_model_id is provided, check access to that model
+            if training_model_id:
+                model_catalog_url = os.getenv("MODEL_CATALOG_URL", "http://model-catalog-service:8000")
+                has_model_access = await check_model_access(db, user_id, training_model_id, model_catalog_url)
+                if has_model_access:
+                    logger.info(
+                        f"User {user_id} granted access to artifact {artifact_id} "
+                        f"via training model {training_model_id} permissions (no upload session found)"
+                    )
+                    return True, None
+            # No session and no training model access - artifact not found in our system
             logger.info(f"No upload session found for artifact {artifact_id} - artifact not found")
             return False, "404"  # Not found, not forbidden
         
@@ -123,15 +134,23 @@ async def check_download_permission(
             return True, None
         
         # Rule 3: Check model-level permissions
-        # If artifact belongs to a model, check if user has access to that model
-        if session.model_id:
+        # For training jobs, allow access if user has access to the training job's model
+        # Otherwise, check access to the model the artifact was originally uploaded to
+        model_to_check = training_model_id if training_model_id else session.model_id
+        if model_to_check:
             model_catalog_url = os.getenv("MODEL_CATALOG_URL", "http://model-catalog-service:8000")
-            has_model_access = await check_model_access(db, user_id, session.model_id, model_catalog_url)
+            has_model_access = await check_model_access(db, user_id, model_to_check, model_catalog_url)
             if has_model_access:
-                logger.info(
-                    f"User {user_id} granted access to artifact {artifact_id} "
-                    f"via model {session.model_id} permissions"
-                )
+                if training_model_id and training_model_id != session.model_id:
+                    logger.info(
+                        f"User {user_id} granted access to artifact {artifact_id} "
+                        f"via training model {training_model_id} permissions (artifact originally from model {session.model_id})"
+                    )
+                else:
+                    logger.info(
+                        f"User {user_id} granted access to artifact {artifact_id} "
+                        f"via model {session.model_id} permissions"
+                    )
                 return True, None
         
         logger.warning(

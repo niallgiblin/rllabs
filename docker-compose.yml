@@ -105,6 +105,9 @@ services:
       - RABBITMQ_USER=admin
       - RABBITMQ_PASS=admin_password
       - RABBITMQ_QUEUE=training_jobs
+      # Redis Configuration for Job Status Tracking
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
     depends_on:
       rabbitmq:
         condition: service_healthy

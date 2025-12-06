@@ -217,7 +217,8 @@ async def detailed_health_check(db: Session = Depends(get_read_db)):
 async def initiate_upload(
     request: UploadInitRequest,
     db: Session = Depends(get_db),
-    user_id: str = Header(..., alias="X-User-Id")
+    user_id: str = Header(..., alias="X-User-Id"),
+    internal: bool = Query(False, description="Generate URLs with internal endpoint for service-to-service access")
 ):
     """
     Initiate a multipart upload session
@@ -259,6 +260,8 @@ async def initiate_upload(
             return UploadInitResponse(**existing_session)
         
         # Create new upload session
+        # If internal=true, use internal endpoint (for service-to-service access in Kubernetes/Docker)
+        use_internal_endpoint = internal
         upload_session = await session_manager.create_upload_session(
             filename=request.filename,
             file_size=request.file_size,
@@ -266,7 +269,8 @@ async def initiate_upload(
             chunk_size=request.chunk_size,
             artifact_type=request.artifact_type,
             model_id=request.model_id,
-            user_id=user_id
+            user_id=user_id,
+            use_internal_endpoint=use_internal_endpoint
         )
         
         logger.info(f"Created upload session {upload_session.upload_id}")
@@ -352,35 +356,46 @@ async def complete_upload(
         
         logger.info(f"Upload {upload_id} completed successfully, artifact_id: {result['artifact_id']}")
         
+        # Get artifact_type from session to determine if we should register as model version
+        # Only register "model" artifacts as versions - config and dataset are supporting files
+        session = db.query(UploadSession).filter(UploadSession.upload_id == upload_id).first()
+        artifact_type = session.artifact_type if session else "model"  # Default to model for backward compatibility
+        
         # SYNCHRONOUS: Register version with Model Catalog Service
-        # This is required - if it fails, the upload is considered failed
-        try:
-            await register_with_model_catalog(
-                model_id=result['model_id'],
-                version=result['version'],
-                storage_path=result['storage_path'],
-                content_hash=result['artifact_id'],
-                user_id=user_id
-            )
-            logger.info(f"Registered artifact with Model Catalog: model_id={result['model_id']}, version={result['version']}")
-            result['registered_with_catalog'] = True
-            
-        except Exception as e:
-            error_str = str(e)
-            # 409 Conflict means version already exists - this is fine, upload was successful
-            if "409" in error_str or "Conflict" in error_str:
-                logger.warning(f"Model Catalog returned 409 (version already exists) - upload successful: {e}")
-                result['registered_with_catalog'] = False
-                result['catalog_message'] = "Version already exists in catalog"
-                # Don't mark as failed - the upload was successful
-            else:
-                logger.error(f"Failed to register with Model Catalog: {e}")
-                # Mark upload as failed since catalog registration is required (except for 409)
-                await session_manager.fail_upload(upload_id, f"Model Catalog registration failed: {str(e)}")
-                raise HTTPException(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail=f"Upload completed but failed to register with Model Catalog: {str(e)}"
+        # Only register model artifacts as versions (not config or dataset)
+        # Config and dataset artifacts are stored but not registered as model versions
+        if artifact_type == "model" and result.get('model_id'):
+            try:
+                await register_with_model_catalog(
+                    model_id=result['model_id'],
+                    version=result['version'],
+                    storage_path=result['storage_path'],
+                    content_hash=result['artifact_id'],
+                    user_id=user_id
                 )
+                logger.info(f"Registered model artifact with Model Catalog: model_id={result['model_id']}, version={result['version']}")
+                result['registered_with_catalog'] = True
+            except Exception as e:
+                error_str = str(e)
+                # 409 Conflict means version already exists - this is fine, upload was successful
+                if "409" in error_str or "Conflict" in error_str:
+                    logger.warning(f"Model Catalog returned 409 (version already exists) - upload successful: {e}")
+                    result['registered_with_catalog'] = False
+                    result['catalog_message'] = "Version already exists in catalog"
+                    # Don't mark as failed - the upload was successful
+                else:
+                    logger.error(f"Failed to register with Model Catalog: {e}")
+                    # Mark upload as failed since catalog registration is required (except for 409)
+                    await session_manager.fail_upload(upload_id, f"Model Catalog registration failed: {str(e)}")
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail=f"Upload completed but failed to register with Model Catalog: {str(e)}"
+                    )
+        else:
+            # Config or dataset artifacts - don't register as model versions
+            logger.info(f"Skipping Model Catalog registration for {artifact_type} artifact (only model artifacts are registered as versions)")
+            result['registered_with_catalog'] = False
+            result['catalog_message'] = f"{artifact_type} artifacts are not registered as model versions"
         
         # ASYNCHRONOUS: Publish ArtifactUploaded event in background (best-effort, fail-open)
         # This is optional - if it fails, we log but don't fail the upload
@@ -495,33 +510,41 @@ async def abort_upload(
 async def check_download_url(
     artifact_id: str,
     db: Session = Depends(get_read_db),
-    user_id: Optional[str] = Header(None, alias="X-User-Id")
+    user_id: Optional[str] = Header(None, alias="X-User-Id"),
+    model_id: Optional[int] = Query(None, description="Model ID for training job context (allows cross-model artifact usage)")
 ):
     """
     Check if an artifact exists (HEAD request for validation)
     
     Used by training service to validate artifacts before downloading.
     Returns 200 if artifact exists and user has permission, 404/403 otherwise.
+    
+    For training jobs, model_id can be provided to allow using artifacts from other models
+    if the user has access to the training job's model.
     """
     storage = get_storage_service()
     
     try:
-        # Check permissions
-        has_permission, error_code = await check_download_permission(db, user_id, artifact_id)
+        # For training jobs, check storage first (artifacts may exist even if not in our DB)
+        # Then check permissions
+        object_key = artifact_id
+        file_info = await storage.get_object_info(object_key)
+        
+        if not file_info:
+            # Artifact doesn't exist in storage - return 404
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Artifact {artifact_id} not found")
+        
+        # Artifact exists in storage - now check permissions
+        # If model_id is provided (training job context), allow access if user has access to that model
+        has_permission, error_code = await check_download_permission(db, user_id, artifact_id, training_model_id=model_id)
         if not has_permission:
             if error_code == "404":
+                # This shouldn't happen if file_info exists, but handle it anyway
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Artifact {artifact_id} not found")
             elif error_code == "403":
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Permission denied")
             else:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid request")
-        
-        # Verify artifact exists in storage
-        object_key = artifact_id
-        file_info = await storage.get_object_info(object_key)
-        
-        if not file_info:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Artifact {artifact_id} not found")
         
         # Return 200 with no body (HEAD request)
         return Response(status_code=200)
@@ -537,6 +560,7 @@ async def check_download_url(
 async def get_download_url(
     artifact_id: str,
     expires_in: int = 3600,
+    internal: bool = Query(False, description="Generate URL with internal endpoint for service-to-service access"),
     background_tasks: BackgroundTasks = BackgroundTasks(),
     db: Session = Depends(get_read_db),
     user_id: Optional[str] = Header(None, alias="X-User-Id")
@@ -622,9 +646,13 @@ async def get_download_url(
             )
         
         # Generate presigned download URL
+        # If internal=true, use internal endpoint (for service-to-service access in Kubernetes)
+        # Otherwise, use public endpoint (for browser/client access)
+        use_internal_endpoint = internal
         download_url = await storage.generate_presigned_get_url(
             object_key=object_key,
-            expires_in=expires_in
+            expires_in=expires_in,
+            use_internal_endpoint=use_internal_endpoint
         )
         
         from datetime import datetime, timedelta

@@ -159,7 +159,8 @@ class StorageService:
         object_key: str,
         upload_id: str,
         part_number: int,
-        expires_in: int = 3600
+        expires_in: int = 3600,
+        use_internal_endpoint: bool = False
     ) -> str:
         """
         Generate a presigned URL for uploading one part
@@ -174,14 +175,14 @@ class StorageService:
             upload_id: MinIO's multipart upload ID
             part_number: Sequential part number (1-based)
             expires_in: URL expiration time in seconds (default: 1 hour)
+            use_internal_endpoint: If True, use internal endpoint (for service-to-service access)
         
         Returns:
             Presigned URL that client can use to PUT the chunk
-            Uses public_endpoint if configured (for browser access)
+            Uses internal_endpoint if use_internal_endpoint=True, otherwise public_endpoint
         """
-        # Use public endpoint for presigned URLs (browser-accessible)
-        # but use internal endpoint for actual operations
-        presigned_endpoint = self.public_endpoint
+        # Use internal endpoint for service-to-service access, public endpoint for browser access
+        presigned_endpoint = self.endpoint if use_internal_endpoint else self.public_endpoint
         
         # Configure boto3 to use path-style addressing and ensure signature compatibility
         # Merge connection pooling config with signature config
@@ -394,7 +395,8 @@ class StorageService:
     async def generate_presigned_get_url(
         self,
         object_key: str,
-        expires_in: int = 3600
+        expires_in: int = 3600,
+        use_internal_endpoint: bool = False
     ) -> str:
         """
         Generate a presigned URL for downloading an object
@@ -404,13 +406,15 @@ class StorageService:
         Args:
             object_key: S3 key to download
             expires_in: URL expiration time in seconds (default: 1 hour)
+            use_internal_endpoint: If True, use internal endpoint (for service-to-service access)
+                                   If False, use public endpoint (for browser/client access)
         
         Returns:
             Presigned URL for GET operation
-            Uses public_endpoint if configured (for browser access)
+            Uses internal_endpoint if use_internal_endpoint=True, otherwise public_endpoint
         """
-        # Use public endpoint for presigned URLs (browser-accessible)
-        presigned_endpoint = self.public_endpoint
+        # Use internal endpoint for service-to-service access, public endpoint for browser access
+        presigned_endpoint = self.endpoint if use_internal_endpoint else self.public_endpoint
         
         # Configure boto3 to use path-style addressing and ensure signature compatibility
         # Merge connection pooling config with signature config
