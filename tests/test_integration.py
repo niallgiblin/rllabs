@@ -14,7 +14,7 @@ import requests
 
 GATEWAY_URL = "http://localhost:8080"
 GATEWAY_URL = "http://localhost:8080"
-CATALOG_DIRECT_URL = "http://localhost:8001"  # Only for health checks
+# All services accessed through API Gateway (security best practice)
 RABBITMQ_HOST = "localhost"
 RABBITMQ_PORT = 5672
 RABBITMQ_USER = "admin"

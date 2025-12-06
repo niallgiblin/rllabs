@@ -56,6 +56,9 @@ kind: Service
 metadata:
   name: rabbitmq
 spec:
+  # SECURITY: ClusterIP (default) - only accessible within cluster
+  # Services connect via service name "rabbitmq" on port 5672
+  # For management UI access, use: kubectl port-forward service/rabbitmq 15672:15672
   selector:
     app: rabbitmq
   ports:
@@ -67,5 +70,7 @@ spec:
       protocol: TCP
       port: 15672
       targetPort: 15672
-  type: LoadBalancer
+  # Changed from LoadBalancer to ClusterIP for security
+  # ClusterIP is the default, but explicitly set for clarity
+  type: ClusterIP
 

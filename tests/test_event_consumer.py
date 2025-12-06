@@ -14,8 +14,7 @@ from datetime import datetime, timedelta, timezone
 import jwt
 
 GATEWAY_URL = "http://localhost:8080"
-CATALOG_DIRECT_URL = "http://localhost:8001"  # Only for health checks
-UPLOAD_DOWNLOAD_DIRECT_URL = "http://localhost:8002"  # Only for health checks
+# All services accessed through API Gateway (security best practice)
 RABBITMQ_HOST = "localhost"
 RABBITMQ_PORT = 5672
 RABBITMQ_USER = "admin"
@@ -212,7 +211,7 @@ def test_event_consumer_auto_registers_model_version():
     
     try:
         # Verify model catalog can receive version registrations
-        response = requests.get(f"{CATALOG_DIRECT_URL}/health", timeout=3)
+        response = requests.get(f"{GATEWAY_URL}/health", timeout=3)
         assert response.status_code == 200
         
         # Verify RabbitMQ is available for events
@@ -403,7 +402,7 @@ def test_event_consumer_graceful_degradation():
     """Test that model catalog works even if event consumer fails"""
     # Verify model catalog can still function without event consumer
     try:
-        response = requests.get(f"{CATALOG_DIRECT_URL}/health", timeout=3)
+        response = requests.get(f"{GATEWAY_URL}/health", timeout=3)
         assert response.status_code == 200
         
         # Model creation should still work

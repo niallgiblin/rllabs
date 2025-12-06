@@ -1,5 +1,27 @@
+# RLLabs Docker Compose Configuration
+# ====================================
+# SECURITY ARCHITECTURE:
+# - All application services (Model Catalog, Upload/Download, Collaboration) are NOT directly exposed
+# - All client requests must go through the API Gateway (port 8080)
+# - This enforces centralized authentication, rate limiting, circuit breakers, and user context propagation
+#
+# INFRASTRUCTURE SERVICES SECURITY:
+# - PostgreSQL (5432), Redis (6379), RabbitMQ (5672/15672), MongoDB (27017-27019):
+#   * Exposed for development/debugging convenience
+#   * In production, these should NOT be exposed to external networks
+#   * Use network policies, firewalls, or VPN for secure access
+#   * These services are internal infrastructure and should only be accessible within the Docker network
+#   * Future: Implement mTLS for inter-service communication in production deployments
+#
+# - MinIO (9000/9001):
+#   * MUST be exposed for presigned URL direct client-to-storage transfers
+#   * Authorization happens BEFORE presigned URL generation (secure)
+#   * Clients download directly from MinIO after receiving authorized presigned URLs
+#   * This is an architectural requirement for performance (bypasses backend bottleneck)
+#   * Future: Consider MinIO behind reverse proxy with TLS, IP allowlisting, shorter URL expiration
+
 services:
-  # API Gateway
+  # API Gateway - Single Entry Point for All Client Requests
   api-gateway:
     build:
       context: .
@@ -19,14 +41,14 @@ services:
       - rllabs-network
 
   # Model Catalog Service (AP System)
+  # SECURITY: Not exposed directly - all access must go through API Gateway (port 8080)
+  # This enforces centralized authentication, rate limiting, and circuit breakers
   model-catalog-service:
     build:
       context: .
       dockerfile: ./model_catalog_service/Dockerfile
     container_name: model-catalog-service
-    # Expose for local tests hitting localhost:8001
-    ports:
-      - "8001:8000"
+    # No ports exposed - accessible only via internal Docker network through API Gateway
     environment:
       - DATABASE_URL=postgresql://rllabs:rllabs_password@postgres/model_catalog_db
       - REDIS_HOST=redis
@@ -48,14 +70,14 @@ services:
       - ./model_catalog_service:/app
 
   # Upload/Download Service
+  # SECURITY: Not exposed directly - all access must go through API Gateway (port 8080)
+  # This enforces centralized authentication, rate limiting, and circuit breakers
   upload-download-service:
     build:
       context: .
       dockerfile: ./upload_download_service/Dockerfile
     container_name: upload-download-service
-    # Expose for local tests hitting localhost:8002
-    ports:
-      - "8002:8002"
+    # No ports exposed - accessible only via internal Docker network through API Gateway
     environment:
       # MinIO Configuration
       - MINIO_ENDPOINT=minio:9000
@@ -310,13 +332,14 @@ services:
       - mongo1
 
   # Collaboration Service
+  # SECURITY: Not exposed directly - all access must go through API Gateway (port 8080)
+  # This enforces centralized authentication, rate limiting, and circuit breakers
   collaboration-service:
     build:
       context: .
       dockerfile: ./collaboration_service/dockerfile
     container_name: collaboration-service
-    ports:
-      - "8004:8000"
+    # No ports exposed - accessible only via internal Docker network through API Gateway
     environment:
       - MONGO_URI=mongodb://mongo1:27017,mongo2:27018,mongo3:27019/?replicaSet=rs0
       - REDIS_HOST=redis

@@ -272,41 +272,102 @@ docker compose up --build
 This starts:
 
 - **Frontend** on http://localhost:5173 (Vue.js dev server with hot reload)
-- **API Gateway** on http://localhost:8080
-- **Model Catalog** on http://localhost:8001
-- **Upload/Download Service** on http://localhost:8002
+- **API Gateway** on http://localhost:8080 (single entry point for all API requests)
+- **Model Catalog** (accessible via API Gateway at http://localhost:8080/api/models)
+- **Upload/Download Service** (accessible via API Gateway at http://localhost:8080/api/uploads and /api/downloads)
 - **Training Service** (RabbitMQ consumer, no HTTP port)
-- **Collaboration Service** on http://localhost:8004
-- **PostgreSQL** on localhost:5432
-- **MongoDB Replica Set** on localhost:27017/27018/27019
-- **Redis** on localhost:6379
-- **RabbitMQ** on localhost:5672 (management UI: http://localhost:15672)
-- **MinIO** on http://localhost:9000 (console: http://localhost:9001)
+- **Collaboration Service** (accessible via API Gateway at http://localhost:8080/api/comments)
+- **PostgreSQL** on localhost:5432 (infrastructure - for debugging/admin access)
+- **MongoDB Replica Set** on localhost:27017/27018/27019 (infrastructure - for debugging/admin access)
+- **Redis** on localhost:6379 (infrastructure - for debugging/admin access)
+- **RabbitMQ** on localhost:5672 (management UI: http://localhost:15672 - for monitoring)
+- **MinIO** on http://localhost:9000 (console: http://localhost:9001 - required for presigned URLs)
 
 **Note**: The frontend is included in docker-compose and will be available at http://localhost:5173 after the build completes. For development with hot reload, the frontend uses Vite's dev server.
 
 3. Verify services are healthy:
 
+**Docker Compose:**
 ```bash
+# All services accessed through API Gateway (security best practice)
 curl http://localhost:8080/health  # Gateway
-curl http://localhost:8001/health  # Catalog
-curl http://localhost:8002/health  # Upload/Download Service
-curl http://localhost:8004/health  # Collaboration Service (if health endpoint exists)
+# Backend services are not directly accessible - all requests must go through API Gateway
+# This enforces centralized authentication, rate limiting, and circuit breakers
 # Training Service doesn't expose HTTP endpoint (RabbitMQ consumer only)
 ```
 
+**Kind/Kubernetes:**
+```bash
+# All services accessed through API Gateway (port-forward required)
+curl http://localhost:8080/health  # Gateway
+# Backend services are not directly accessible - use API Gateway endpoints
+# Training Service doesn't expose HTTP endpoint (RabbitMQ consumer only)
+```
+
+**Security Note:** Backend services (Model Catalog, Upload/Download, Collaboration) are not exposed directly in either deployment. All client requests must go through the API Gateway at `http://localhost:8080`, which enforces:
+- JWT-based authentication
+- Rate limiting (user-based and IP-based)
+- Circuit breakers for fault tolerance
+- User context propagation (`X-User-Id` header)
+- Centralized security policies
+
 5. Check Training Service is running:
 
+**Docker Compose:**
 ```bash
 docker compose logs model-train-service
 # Should see: "Waiting for messages on queue 'training_jobs'..."
 ```
 
+**Kind/Kubernetes:**
+```bash
+kubectl logs -l app=model-train-service --tail=50
+# Should see: "Waiting for messages on queue 'training_jobs'..."
+```
+
 6. Stop and clean up:
 
+**Docker Compose:**
 ```bash
 docker compose down -v
 ```
+
+**Kind/Kubernetes:**
+```bash
+# Delete cluster
+kind delete cluster --name rllabs
+
+# Or delete specific resources
+kubectl delete -k kubernetes
+```
+
+### Docker Compose vs Kind/Kubernetes Differences
+
+**Service Access:**
+- **Docker Compose**: All application services are accessed through the API Gateway at `http://localhost:8080` (security best practice)
+- **Kind/Kubernetes**: All services are accessed through the API Gateway at `http://localhost:8080`. Backend services require port-forwards for direct access
+- **Both deployments**: Enforce the same security architecture - centralized authentication, rate limiting, and circuit breakers through the API Gateway
+
+**Health Checks:**
+- **Docker Compose**: Can check individual service health endpoints directly
+- **Kind/Kubernetes**: Health checks go through API Gateway; individual service health requires port-forwards or kubectl exec
+
+**Port Forwards:**
+- **Docker Compose**: Not needed - services bind directly to localhost ports
+- **Kind/Kubernetes**: Port-forwards are automatically set up by `start_everything.sh`:
+  - API Gateway: `8080:8080`
+  - Frontend: `5173:80`
+  - MinIO: `9000:9000`
+  - Grafana: `3000:3000`
+  - Prometheus: `9090:9090`
+  - Jaeger: `16686:16686`
+  - Alertmanager: `9093:9093`
+  - Loki: `3100:3100`
+
+**Manual Testing:**
+- Both deployments support the same API endpoints through the API Gateway
+- All manual tests from the README work identically in both environments
+- Use `python3 scripts/run_manual_tests.py` to verify functionality in either environment
 
 ### Running Tests
 
@@ -614,8 +675,18 @@ Response:
 
 ```bash
 # Start upload session
-curl -X POST "http://localhost:8080/api/uploads?filename=model.weights&size_bytes=1048576&mime_type=application/octet-stream&model_id=1" \
-  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+# Note: Requires JSON body with file_hash (SHA-256 hash of file content)
+curl -X POST http://localhost:8080/api/uploads \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "filename": "model.weights",
+    "file_size": 1048576,
+    "file_hash": "sha256:abc123...",
+    "chunk_size": 5242880,
+    "artifact_type": "model",
+    "model_id": 1
+  }'
 ```
 
 Response:
@@ -623,16 +694,31 @@ Response:
 ```json
 {
   "upload_id": "uuid-here",
-  "presigned_urls": ["https://presigned-url-for-part-1"],
-  "bucket": "rllabs-artifacts"
+  "presigned_urls": [
+    {
+      "part_number": 1,
+      "url": "https://presigned-url-for-part-1",
+      "expires_at": "2024-01-01T12:00:00Z"
+    }
+  ],
+  "session_expires_at": "2024-01-01T13:00:00Z"
 }
 ```
 
 After uploading parts to presigned URLs, complete the upload:
 
 ```bash
-curl -X POST "http://localhost:8080/api/uploads/{upload_id}/complete?expected_hash=sha256:abc123...&etag=etag-from-upload" \
-  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+curl -X POST http://localhost:8080/api/uploads/{upload_id}/complete \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "parts": [
+      {
+        "part_number": 1,
+        "etag": "etag-from-upload-response"
+      }
+    ]
+  }'
 ```
 
 This triggers an `ArtifactCommitted` event, which the Model Catalog consumes to auto-register a version.
@@ -699,9 +785,14 @@ curl -X DELETE http://localhost:8080/api/models/{model_id} \
 
 ```bash
 # Delete an artifact (owner or admin only)
+# Note: Gateway must have /api/artifacts route configured (see api_gateway/config.py)
 curl -X DELETE http://localhost:8080/api/artifacts/{artifact_id} \
   -H "Authorization: Bearer YOUR_JWT_TOKEN"
 ```
+
+**Note:** The API Gateway configuration includes `/api/artifacts` route. If you modify the gateway config, restart the gateway service to pick up changes:
+- **Docker Compose**: `docker compose restart api-gateway`
+- **Kind/Kubernetes**: `kubectl rollout restart deployment/api-gateway`
 
 **Authorization:**
 
@@ -769,7 +860,12 @@ Response:
 docker compose logs -f model-train-service
 
 # Check RabbitMQ queue
+# Docker Compose:
 curl -u admin:admin_password http://localhost:15672/api/queues/%2F/training_jobs
+
+# Kubernetes/Kind (requires port-forward):
+# kubectl port-forward service/rabbitmq 15672:15672
+# Then: curl -u admin:admin_password http://localhost:15672/api/queues/%2F/training_jobs
 
 # View training progress in logs
 docker compose logs model-train-service | grep "Training job"
@@ -920,20 +1016,40 @@ All GET `/api/models*` endpoints are public (no authentication required). This e
 
 **Verify RabbitMQ is running:**
 
+**Docker Compose:**
 ```bash
+curl -u admin:admin_password http://localhost:15672/api/overview
+```
+
+**Kubernetes/Kind:**
+```bash
+# First, set up port-forward for RabbitMQ management UI
+kubectl port-forward service/rabbitmq 15672:15672
+
+# Then in another terminal:
 curl -u admin:admin_password http://localhost:15672/api/overview
 ```
 
 **View events via Management UI:**
 
+**Docker Compose:**
 1. Open http://localhost:15672 in your browser
 2. Login with `admin` / `admin_password`
 3. Navigate to **Exchanges** → `model_events`
 4. Check **Bindings** to see queue subscriptions
 5. Monitor published messages in real-time
 
+**Kubernetes/Kind:**
+1. Set up port-forward: `kubectl port-forward service/rabbitmq 15672:15672`
+2. Open http://localhost:15672 in your browser
+3. Login with `admin` / `admin_password`
+4. Navigate to **Exchanges** → `model_events`
+5. Check **Bindings** to see queue subscriptions
+6. Monitor published messages in real-time
+
 **Testing event publishing programmatically:**
 
+**Docker Compose:**
 ```python
 import pika
 import json
@@ -942,6 +1058,20 @@ import json
 credentials = pika.PlainCredentials('admin', 'admin_password')
 connection = pika.BlockingConnection(
     pika.ConnectionParameters('localhost', 5672, credentials=credentials)
+)
+```
+
+**Kubernetes/Kind:**
+```python
+import pika
+import json
+
+# Note: Services connect via service name "rabbitmq" on port 5672 (internal cluster DNS)
+# For external access, use port-forward: kubectl port-forward service/rabbitmq 5672:5672
+# Then connect to localhost:5672
+credentials = pika.PlainCredentials('admin', 'admin_password')
+connection = pika.BlockingConnection(
+    pika.ConnectionParameters('localhost', 5672, credentials=credentials)  # Requires port-forward
 )
 channel = connection.channel()
 
@@ -1073,6 +1203,42 @@ Integration tests automatically verify event publishing. See `tests/test_integra
 - Clients upload/download directly to/from MinIO (bypasses backend)
 - Authorization happens before URL generation (secure)
 - **Trade-off**: High performance (no backend bottleneck) + Security (authorization before access)
+
+**Network Security**
+
+**Current Implementation:**
+- Application services (Model Catalog, Upload/Download, Collaboration) are NOT directly exposed
+- All client requests must go through API Gateway (port 8080)
+- **Docker Compose**: Infrastructure services (PostgreSQL, Redis, RabbitMQ, MongoDB) are exposed for development/debugging
+- **Kubernetes**: Infrastructure services are secured (ClusterIP) - NOT exposed externally
+- MinIO is exposed for presigned URL direct transfers (authorization happens before URL generation)
+
+**Docker Compose vs Kubernetes Security:**
+- **Docker Compose**: Services secured by removing `ports:` mappings - services communicate via Docker network only. Infrastructure services exposed via port mappings.
+- **Kubernetes**: Services secured by default (ClusterIP) - only accessible within cluster, no external exposure. Infrastructure services use ClusterIP (not exposed).
+- See `docs/SECURITY_COMPARISON.md` for detailed comparison
+
+**Production Security Recommendations:**
+- **Remove infrastructure service port exposures** - Use network policies, firewalls, or VPN for admin access
+- **Implement mTLS (mutual TLS)** for inter-service communication:
+  - API Gateway ↔ Backend Services: mTLS for service-to-service authentication
+  - Prevents service impersonation and man-in-the-middle attacks
+  - Each service has its own certificate signed by a trusted CA
+  - Service mesh (Istio, Linkerd) can provide automatic mTLS
+- **Network Policies**: Restrict which pods can communicate with each other (Kubernetes only)
+- **Secrets Management**: Use Kubernetes Secrets or external secret managers (Vault) for credentials
+- **MinIO Security**: In production, consider:
+  - MinIO behind a reverse proxy with TLS termination
+  - IP allowlisting for presigned URL access
+  - Shorter presigned URL expiration times
+  - Audit logging for all storage access
+
+**Future Enhancements:**
+- Service mesh with automatic mTLS (Istio, Linkerd)
+- Certificate-based service authentication
+- Network segmentation with Kubernetes Network Policies
+- Encrypted inter-service communication
+- Zero-trust network architecture
 
 ### Data Consistency Strategies
 
@@ -1236,7 +1402,15 @@ Model Catalog → Publish ModelCreated event
 
 **RabbitMQ Management UI:**
 
+**Docker Compose:**
 - URL: http://localhost:15672
+- Username: `admin`
+- Password: `admin_password`
+- Use to monitor queues, exchanges, and message flow
+
+**Kubernetes/Kind:**
+- Requires port-forward: `kubectl port-forward service/rabbitmq 15672:15672`
+- Then access: http://localhost:15672
 - Username: `admin`
 - Password: `admin_password`
 - Use to monitor queues, exchanges, and message flow

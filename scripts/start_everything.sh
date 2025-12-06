@@ -26,12 +26,29 @@ echo "────────────────────────�
 
 CLUSTER_NAME=$(kind get clusters 2>/dev/null | head -1)
 if [ -z "$CLUSTER_NAME" ]; then
-    echo -e "${RED}No kind cluster found. Please create a cluster first.${NC}"
-    echo "  Run: kind create cluster --name rllabs"
-    exit 1
+    echo -e "${YELLOW}No kind cluster found. Creating cluster 'rllabs'...${NC}"
+    if [ -f "kind-cluster-config.yml" ]; then
+        echo "  Using cluster config: kind-cluster-config.yml"
+        if kind create cluster --name rllabs --config kind-cluster-config.yml; then
+            echo -e "  ${GREEN}✓ Cluster 'rllabs' created successfully${NC}"
+            CLUSTER_NAME="rllabs"
+        else
+            echo -e "${RED}✗ Failed to create cluster${NC}"
+            exit 1
+        fi
+    else
+        echo "  Creating cluster with default configuration..."
+        if kind create cluster --name rllabs; then
+            echo -e "  ${GREEN}✓ Cluster 'rllabs' created successfully${NC}"
+            CLUSTER_NAME="rllabs"
+        else
+            echo -e "${RED}✗ Failed to create cluster${NC}"
+            exit 1
+        fi
+    fi
+else
+    echo "  Using existing kind cluster: $CLUSTER_NAME"
 fi
-
-echo "  Using kind cluster: $CLUSTER_NAME"
 
 # Check if docker-compose is running (can slow down builds)
 if docker ps --format "{{.Names}}" | grep -qE "rabbitmq|postgres|redis|mongo"; then

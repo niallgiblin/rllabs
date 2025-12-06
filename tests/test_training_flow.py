@@ -22,8 +22,7 @@ import pytest
 import requests
 
 GATEWAY_URL = "http://localhost:8080"
-UPLOAD_DOWNLOAD_DIRECT_URL = "http://localhost:8002"
-MODEL_CATALOG_DIRECT_URL = "http://localhost:8001"
+# All services accessed through API Gateway (security best practice)
 
 # Must match jwt_auth.py for local dev
 SECRET_KEY = "your-secret-key"
@@ -93,14 +92,8 @@ def _create_test_artifacts():
 def wait_for_services():
     for _ in range(60):
         try:
-            # Only check gateway - it will proxy to other services
+            # Check gateway - it will proxy to other services
             if requests.get(f"{GATEWAY_URL}/health", timeout=3).status_code == 200:
-                # Also check direct services are accessible (for tests that need them)
-                try:
-                    requests.get(f"{UPLOAD_DOWNLOAD_DIRECT_URL}/health", timeout=2)
-                    requests.get(f"{MODEL_CATALOG_DIRECT_URL}/health", timeout=2)
-                except Exception:
-                    pass  # Direct URLs optional, gateway is primary
                 return
         except Exception:
             pass

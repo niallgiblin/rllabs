@@ -28,6 +28,7 @@ class Settings(BaseSettings):
         # Upload/Download Service
         "/api/uploads": "http://upload-download-service:8002",
         "/api/downloads": "http://upload-download-service:8002",
+        "/api/artifacts": "http://upload-download-service:8002",
         
         # Collaboration Service (comments)
         "/api/comments": "http://collaboration-service:8000",

@@ -19,12 +19,8 @@ import jwt
 import pytest
 import requests
 
-# Service URLs
+# Service URLs - All services accessed through API Gateway (security best practice)
 GATEWAY_URL = "http://localhost:8080"
-# Use gateway for API calls, direct URLs only for health checks
-GATEWAY_URL = "http://localhost:8080"
-CATALOG_DIRECT_URL = "http://localhost:8001"  # Only for health checks
-UPLOAD_DOWNLOAD_DIRECT_URL = "http://localhost:8002"  # Only for health checks
 
 # JWT settings (must match jwt_auth.py)
 SECRET_KEY = "your-secret-key"
@@ -56,11 +52,6 @@ def wait_for_services():
     for _ in range(30):
         try:
             if requests.get(f"{GATEWAY_URL}/health", timeout=3).status_code == 200:
-                # Try catalog service
-                try:
-                    requests.get(f"{CATALOG_DIRECT_URL}/health", timeout=3)
-                except:
-                    pass
                 return
         except Exception:
             pass
