@@ -197,7 +197,10 @@ class EventConsumer:
     
     def _handle_artifact_committed(self, event: dict):
         """
-        Handle ArtifactCommitted event by auto-registering model version
+        Handle ArtifactCommitted event (notification only, NOT for version registration)
+        
+        NOTE: Version registration uses synchronous HTTP for strong consistency (CP alignment).
+        This event handler is for notifications/logging only, not for registering versions.
         
         Args:
             event: Event payload containing artifact information
@@ -209,39 +212,16 @@ class EventConsumer:
             content_hash = event.get("content_hash")
             uploaded_by = event.get("uploaded_by")
             
-            if not model_id:
-                logger.debug(f"ArtifactCommitted event for artifact {artifact_id} has no model_id, skipping")
-                return
-            
-            if not storage_path or not content_hash:
-                logger.warning(
-                    f"ArtifactCommitted event missing required fields: "
-                    f"storage_path={storage_path}, content_hash={content_hash}"
-                )
-                return
-            
             logger.info(
-                f"ArtifactCommitted event received: artifact_id={artifact_id[:16]}..., "
-                f"model_id={model_id}, storage_path={storage_path[:50]}..., "
+                f"ArtifactCommitted event received (notification): artifact_id={artifact_id[:16] if artifact_id else 'N/A'}..., "
+                f"model_id={model_id}, storage_path={storage_path[:50] if storage_path else 'N/A'}..., "
                 f"uploaded_by={uploaded_by}"
             )
             
-            version = self._register_model_version(
-                model_id=model_id,
-                storage_path=storage_path,
-                content_hash=content_hash
+            logger.debug(
+                f"Version registration for model {model_id} handled via synchronous HTTP "
+                f"(strong consistency), event is for notification only"
             )
-            
-            if version:
-                logger.info(
-                    f"Successfully auto-registered version {version} for model {model_id} "
-                    f"from ArtifactCommitted event"
-                )
-            else:
-                logger.debug(
-                    f"Version registration skipped for model {model_id} "
-                    f"(may already exist or registration failed)"
-                )
             
         except Exception as e:
             logger.error(f"Error handling ArtifactCommitted event: {e}", exc_info=True)

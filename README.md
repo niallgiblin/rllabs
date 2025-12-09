@@ -36,8 +36,8 @@ RLLabs is designed as a microservices architecture where specialized services ha
 - Created-by tracking for ownership
 - **Public Browsing**: GET endpoints are accessible without authentication
 - **Admin Delete**: Owners and admins can delete models (DELETE `/models/{model_id}`)
-- **Event Consumer**: Listens to `artifact.committed` events to auto-register model versions
 - **Event Publisher**: Publishes `ModelCreated` and `ModelDeleted` events to RabbitMQ
+- **Version Registration**: Receives synchronous HTTP calls from Upload/Download Service for strong consistency (CP alignment)
 
 **Upload/Download Service** (Port 8002)
 
@@ -51,8 +51,8 @@ RLLabs is designed as a microservices architecture where specialized services ha
 - **Admin Delete**: Owners and admins can delete artifacts (DELETE `/artifacts/{artifact_id}`)
 - Content-addressed storage (SHA-256 based deduplication)
 - PostgreSQL metadata for artifacts and upload sessions
-- **Event Publisher**: Publishes `ArtifactCommitted` events to RabbitMQ
-- **Integration**: Auto-registers artifacts as model versions when `model_id` provided
+- **Version Registration**: Synchronous HTTP call to Model Catalog Service (strong consistency, CP alignment)
+- **Event Publisher**: Publishes `ArtifactCommitted` and `ArtifactUploaded` events to RabbitMQ (for notifications only)
 - **Security**: Authorization at application layer (before MinIO access) for secure + performant file transfers
 
 **Training Service** (Port 8003)
@@ -171,7 +171,7 @@ RLLabs is designed as a microservices architecture where specialized services ha
 - Duplicate name and version handling
 - **Ownership API**: `/models/{model_id}/ownership` endpoint for RBAC permission checks
 - **Event Publishing**: ModelCreated events to RabbitMQ
-- **Event Consumer**: Listens to `artifact.committed` events and auto-registers model versions
+- **Version Registration**: Receives synchronous HTTP calls from Upload/Download Service (strong consistency, CP alignment)
 
 **Upload/Download Service**
 
@@ -196,7 +196,7 @@ RLLabs is designed as a microservices architecture where specialized services ha
 - Topic exchanges (`model_events`, `artifact_events`) for event routing
 - **ModelCreated** event publishing on model creation
 - **ArtifactCommitted** event publishing on artifact upload completion
-- Event consumer in Model Catalog for artifact-driven version registration
+- Synchronous HTTP calls from Upload/Download Service for version registration (strong consistency)
 - Graceful degradation if RabbitMQ unavailable
 - Persistent messages (survive broker restarts)
 - Connection retry logic with automatic reconnection
@@ -235,7 +235,7 @@ RLLabs is designed as a microservices architecture where specialized services ha
 - **Async Messaging**: Model and artifact lifecycle events via RabbitMQ
 - **Training Job Flow**: Upload/Download Service → RabbitMQ → Training Service → MinIO → Model Catalog
 - **Collaboration Flow**: Model Catalog → RabbitMQ → Collaboration Service (event-driven model metadata caching)
-- **Event-Driven Workflows**: Artifact uploads auto-register as model versions
+- **Synchronous Version Registration**: Artifact uploads trigger immediate version registration via HTTP (strong consistency)
 - **Fault Tolerance**: Circuit breakers, retry with exponential backoff
 - **Security**: Authorization at application layer, direct client-to-MinIO transfers for performance
 - **IP-Based Rate Limiting**: Unauthenticated users rate-limited by IP address
@@ -352,17 +352,25 @@ kubectl delete -k kubernetes
 - **Docker Compose**: Can check individual service health endpoints directly
 - **Kind/Kubernetes**: Health checks go through API Gateway; individual service health requires port-forwards or kubectl exec
 
-**Port Forwards:**
+**Port Forwards (Development/Debugging Only):**
 - **Docker Compose**: Not needed - services bind directly to localhost ports
-- **Kind/Kubernetes**: Port-forwards are automatically set up by `start_everything.sh`:
-  - API Gateway: `8080:8080`
+- **Kind/Kubernetes**: Port-forwards are automatically set up by `start_everything.sh` for development convenience:
+  - API Gateway: `8080:8080` (or use ingress: `http://api.localhost`)
   - Frontend: `5173:80`
-  - MinIO: `9000:9000`
   - Grafana: `3000:3000`
   - Prometheus: `9090:9090`
   - Jaeger: `16686:16686`
   - Alertmanager: `9093:9093`
   - Loki: `3100:3100`
+  - **MinIO**: Uses ingress (`http://minio.localhost`) - no port-forward needed
+
+**Note**: Port-forwards bypass Kubernetes networking and are for development only. Production deployments should use ingress for external access.
+
+**Ingress (Production-Ready Access):**
+- **MinIO**: `http://minio.localhost` (API) and `http://minio-console.localhost` (Console)
+- **API Gateway**: `http://api.localhost` (if ingress hostname configured)
+- **Security**: Ingress provides proper Kubernetes networking, TLS termination, and routing
+- **Presigned URLs**: MinIO ingress enables direct client-to-storage transfers with proper authorization checks
 
 **Manual Testing:**
 - Both deployments support the same API endpoints through the API Gateway
@@ -542,7 +550,7 @@ pytest tests/test_event_consumer.py -v
 
 Tests event consumer functionality:
 
-- Model Catalog event consumer listening to artifact events
+- Model Catalog receiving synchronous HTTP calls for version registration
 - Auto-registration of model versions from artifact uploads
 - Error handling and reconnection logic
 - All model creation goes through gateway
@@ -723,7 +731,7 @@ curl -X POST http://localhost:8080/api/uploads/{upload_id}/complete \
   }'
 ```
 
-This triggers an `ArtifactCommitted` event, which the Model Catalog consumes to auto-register a version.
+This triggers a synchronous HTTP call to Model Catalog Service to register the version immediately (strong consistency).
 
 ### Downloading an Artifact
 
@@ -1119,7 +1127,7 @@ Integration tests automatically verify event publishing. See `tests/test_integra
 **Asynchronous Messaging (Event-Driven)**
 
 - **Services → RabbitMQ**: Event publishing for non-critical operations
-- **RabbitMQ → Event Consumers**: Async processing of model/artifact lifecycle events
+- **RabbitMQ → Event Consumers**: Async processing of model/artifact lifecycle events (notifications only, NOT for version registration)
 - **Trade-off**: Loose coupling and scalability, but eventual consistency
 - **Use Case**: Non-blocking operations (event notifications, auto-registration)
 
@@ -1210,10 +1218,11 @@ Integration tests automatically verify event publishing. See `tests/test_integra
 
 **Current Implementation:**
 - Application services (Model Catalog, Upload/Download, Collaboration) are NOT directly exposed
-- All client requests must go through API Gateway (port 8080)
+- All client requests must go through API Gateway (port 8080 or `http://api.localhost` via ingress)
 - **Docker Compose**: Infrastructure services (PostgreSQL, Redis, RabbitMQ, MongoDB) are exposed for development/debugging
 - **Kubernetes**: Infrastructure services are secured (ClusterIP) - NOT exposed externally
-- MinIO is exposed for presigned URL direct transfers (authorization happens before URL generation)
+- **MinIO**: Uses ingress (`minio.localhost`) for presigned URL direct transfers (authorization happens before URL generation)
+- **Port-Forwards**: Development convenience only - bypass Kubernetes networking. Not recommended for production.
 
 **Docker Compose vs Kubernetes Security:**
 - **Docker Compose**: Services secured by removing `ports:` mappings - services communicate via Docker network only. Infrastructure services exposed via port mappings.
@@ -1252,9 +1261,9 @@ Integration tests automatically verify event publishing. See `tests/test_integra
 
 **Eventual Consistency** (RabbitMQ Events)
 
-- Model lifecycle events: Processed asynchronously
-- Auto-registration: Artifact uploads trigger model version creation via events
-- **Trade-off**: Eventual consistency allows high throughput, but introduces delay
+- Model lifecycle events: Processed asynchronously (notifications only)
+- **Note**: Version registration uses synchronous HTTP for strong consistency, NOT events
+- **Trade-off**: Eventual consistency allows high throughput for notifications, but version registration requires immediate consistency
 
 **Idempotency** (Redis + Database)
 
@@ -1378,15 +1387,15 @@ Model Catalog → Publish ModelCreated event
 4. Event consumers receive notification asynchronously
 5. Response returned to client immediately (non-blocking)
 
-**Example Flow (Artifact Upload with Auto-Registration):**
+**Example Flow (Artifact Upload with Version Registration):**
 
 1. Client uploads artifact via Gateway → Upload/Download Service
 2. Upload/Download Service stores file in MinIO (content-addressed storage)
 3. Upload/Download Service saves metadata to PostgreSQL
-4. Upload/Download Service publishes `ArtifactCommitted` event to RabbitMQ (includes `model_id` if provided)
-5. Model Catalog event consumer receives `ArtifactCommitted` event
-6. Model Catalog automatically creates model version (if `model_id` present)
-7. Response returned to client immediately (non-blocking)
+4. Upload/Download Service makes **synchronous HTTP call** to Model Catalog Service to register version (strong consistency, CP alignment)
+5. If Model Catalog is unavailable, upload fails (fail-closed to maintain consistency)
+6. Upload/Download Service publishes `ArtifactCommitted` event to RabbitMQ (notification only, best-effort)
+7. Response returned to client after version registration completes (synchronous)
 
 **Example Flow (Training Job):**
 
@@ -1426,7 +1435,8 @@ Model Catalog → Publish ModelCreated event
 
 **Kubernetes/Kind:**
 - Infrastructure services use ClusterIP (internal only)
-- Use `kubectl port-forward` for temporary access:
+- **MinIO**: Uses ingress (`http://minio.localhost`) - no port-forward needed for presigned URLs
+- Use `kubectl port-forward` for temporary access to other infrastructure services:
   ```bash
   # PostgreSQL
   kubectl port-forward svc/postgres-primary 5432:5432

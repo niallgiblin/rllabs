@@ -128,9 +128,9 @@ async def lifespan(app: FastAPI):
             consumer = get_event_consumer()
             if consumer:
                 consumer.start_consuming()
-                print("Event consumer started for ArtifactCommitted events")
+                logger.info("Event consumer started for ArtifactCommitted events (notifications only, version registration via synchronous HTTP)")
         except Exception as e:
-            print(f"Failed to start event consumer: {e}")
+            logger.warning(f"Failed to start event consumer: {e}")
     
     if CACHING_ENABLED and os.getenv("CACHE_WARMING_ENABLED", "false").lower() == "true":
         try:
