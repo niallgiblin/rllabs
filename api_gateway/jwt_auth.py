@@ -3,12 +3,10 @@ from datetime import datetime, timedelta
 from fastapi import HTTPException, status, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Optional, List, Dict
-from functools import lru_cache
 import hashlib
 import time
 
-# Configuration for JWT
-SECRET_KEY = "your-secret-key"  # In production, load from env vars
+SECRET_KEY = "your-secret-key" #Hardcoded in local, in production this would use a .env var
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 

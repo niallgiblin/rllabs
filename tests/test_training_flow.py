@@ -22,10 +22,8 @@ import pytest
 import requests
 
 GATEWAY_URL = "http://localhost:8080"
-# All services accessed through API Gateway (security best practice)
 
-# Must match jwt_auth.py for local dev
-SECRET_KEY = "your-secret-key"
+SECRET_KEY = "your-secret-key" # Hardcoded for local dev, in production use .env
 ALGORITHM = "HS256"
 
 
@@ -92,7 +90,6 @@ def _create_test_artifacts():
 def wait_for_services():
     for _ in range(60):
         try:
-            # Check gateway - it will proxy to other services
             if requests.get(f"{GATEWAY_URL}/health", timeout=3).status_code == 200:
                 return
         except Exception:
@@ -110,7 +107,6 @@ def token():
 def test_artifacts():
     config_file, dataset_file, weights_file, temp_dir = _create_test_artifacts()
     yield config_file, dataset_file, weights_file
-    # Cleanup
     import shutil
     shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -120,8 +116,6 @@ class TestTrainingFlow:
     def test_full_training_flow(self, token, test_artifacts):
         config_file, dataset_file, weights_file = test_artifacts
         
-        # Step 1: Create a model
-        # Use a more unique name to avoid conflicts
         model_response = requests.post(
             f"{GATEWAY_URL}/api/models",
             headers={"Authorization": f"Bearer {token}"},
@@ -130,19 +124,16 @@ class TestTrainingFlow:
                 "description": "Test model for training flow"
             }
         )
-        # Allow 201 (created) or 409 (conflict if name already exists)
         assert model_response.status_code in [201, 409]
         if model_response.status_code == 409:
             pytest.skip("Model name conflict - skipping test")
         model_id = model_response.json()["id"]
         
-        # Step 2: Upload artifacts
         def upload_artifact(filepath, artifact_type):
             """Helper to upload an artifact using the proper multipart upload flow"""
             file_hash = _calculate_sha256(filepath)
             file_size = filepath.stat().st_size
             
-            # Step 1: Initiate upload
             init_data = {
                 "filename": filepath.name,
                 "file_size": file_size,
@@ -151,7 +142,6 @@ class TestTrainingFlow:
                 "artifact_type": artifact_type,
                 "model_id": model_id
             }
-            # Use gateway for uploads to test full security flow
             init_response = requests.post(
                 f"{GATEWAY_URL}/api/uploads",
                 headers={
@@ -165,26 +155,20 @@ class TestTrainingFlow:
             upload_id = init_data_resp["upload_id"]
             presigned_urls = init_data_resp.get("presigned_urls", [])
             
-            # Check if upload was already completed (idempotency)
             if init_data_resp.get("status") == "already_completed" or not presigned_urls:
-                # File already uploaded - return artifact_id from response
                 artifact_id = init_data_resp.get("artifact_id")
                 if artifact_id:
                     return artifact_id
-                # Fallback: use file_hash as artifact_id (content-addressed storage)
                 return file_hash
             
-            # Step 2: Upload file chunks to presigned URLs
             parts = []
             with open(filepath, "rb") as f:
                 for i, presigned_url_info in enumerate(presigned_urls, 1):
-                    # Presigned URLs can be strings or dicts with 'url' key
                     if isinstance(presigned_url_info, dict):
                         upload_url = presigned_url_info.get("url", presigned_url_info.get("presigned_url", ""))
                     else:
                         upload_url = presigned_url_info
                     
-                    # Replace minio:9000 with localhost:9000 for host access
                     upload_url = upload_url.replace("minio:9000", "localhost:9000")
                     
                     chunk_data = f.read(5 * 1024 * 1024)
@@ -196,7 +180,6 @@ class TestTrainingFlow:
                     etag = chunk_response.headers.get("ETag", "").strip('"')
                     parts.append({"part_number": i, "etag": etag})
             
-            # Step 3: Complete upload (through gateway)
             complete_response = requests.post(
                 f"{GATEWAY_URL}/api/uploads/{upload_id}/complete",
                 headers={
@@ -212,7 +195,6 @@ class TestTrainingFlow:
         dataset_artifact = upload_artifact(dataset_file, "dataset")
         model_artifact = upload_artifact(weights_file, "model")
         
-        # Step 3: Trigger training job
         job_response = requests.post(
             f"{GATEWAY_URL}/api/training-jobs",
             headers={
@@ -226,15 +208,12 @@ class TestTrainingFlow:
                 "model_id": model_id
             }
         )
-        # Allow 202 (accepted) or 500 (if service has issues)
         if job_response.status_code != 202:
-            # Log the error for debugging
             error_detail = job_response.text
             pytest.skip(f"Training job creation failed with {job_response.status_code}: {error_detail}")
         assert job_response.status_code == 202
         job_id = job_response.json()["job_id"]
         
-        # Step 4: Wait for training to complete
         max_wait = 300
         start_time = time.time()
         trained_artifact_id = None
@@ -253,7 +232,6 @@ class TestTrainingFlow:
         
         assert trained_artifact_id is not None, "Training did not complete in time"
         
-        # Step 5: Download trained weights (through gateway)
         download_response = requests.get(
             f"{GATEWAY_URL}/api/downloads/{trained_artifact_id}",
             headers={"Authorization": f"Bearer {token}"}
@@ -263,7 +241,6 @@ class TestTrainingFlow:
         assert "download_url" in download_data
         assert download_data["file_size"] > 0
         
-        # Step 6: Verify model versions
         versions_response = requests.get(
             f"{GATEWAY_URL}/api/models/{model_id}/versions"
         )
@@ -281,7 +258,6 @@ class TestTrainingFlow:
         """Test that multiple training runs create sequential versions"""
         config_file, dataset_file, weights_file = test_artifacts
         
-        # Create model
         model_response = requests.post(
             f"{GATEWAY_URL}/api/models",
             headers={"Authorization": f"Bearer {token}"},
@@ -293,27 +269,18 @@ class TestTrainingFlow:
         assert model_response.status_code == 201
         model_id = model_response.json()["id"]
         
-        # Upload artifacts once (idempotency will reuse them)
-        # For simplicity, we'll just verify versioning works
-        # In a real scenario trigger multiple training jobs will triggered
-        
-        # Check initial versions
         versions_response = requests.get(
             f"{GATEWAY_URL}/api/models/{model_id}/versions"
         )
         assert versions_response.status_code == 200
         initial_count = len(versions_response.json())
         
-        # After multiple training jobs, version count should increase
-        # (This test would need actual training jobs to complete)
-        # For now just verify the endpoint works
         assert initial_count >= 0
     
     def test_training_job_with_explicit_model_id(self, token, test_artifacts):
         """Test that explicit model_id in request is used correctly"""
         config_file, dataset_file, weights_file = test_artifacts
         
-        # Create two models
         model1_response = requests.post(
             f"{GATEWAY_URL}/api/models",
             headers={"Authorization": f"Bearer {token}"},
@@ -328,19 +295,12 @@ class TestTrainingFlow:
         )
         model2_id = model2_response.json()["id"]
         
-        # Upload artifacts (same artifacts for both models)
-        # ... (upload logic here)
-        
-        # Trigger training with explicit model_id=model2_id
-        # Verify trained weights are associated with model2, not model1
-        # (This would require actual training completion)
         assert model1_id != model2_id
     
     def test_training_job_without_model_id_fallback(self, token, test_artifacts):
         """Test that training job falls back to lookup when model_id not provided"""
         config_file, dataset_file, weights_file = test_artifacts
         
-        # Create model and upload artifacts
         model_response = requests.post(
             f"{GATEWAY_URL}/api/models",
             headers={"Authorization": f"Bearer {token}"},
@@ -348,17 +308,10 @@ class TestTrainingFlow:
         )
         model_id = model_response.json()["id"]
         
-        # Upload model artifact (so lookup can find it)
-        # ... (upload logic here)
-        
-        # Trigger training without explicit model_id
-        # Should fall back to lookup from artifact upload history
-        # (This would require actual training completion)
         assert model_id is not None
     
     def test_download_trained_model(self, token):
         """Test downloading a trained model by artifact ID"""
-        # First, get a model with versions
         models_response = requests.get(f"{GATEWAY_URL}/api/models")
         if models_response.status_code == 200:
             data = models_response.json()
@@ -373,26 +326,18 @@ class TestTrainingFlow:
                     if versions:
                         artifact_id = versions[0]["content_hash"]
                         
-                        # Test download (through gateway)
-                        # Note: Download may return 403 if user doesn't have permission
-                        # (e.g., artifact was uploaded by different user or model is private)
                         download_response = requests.get(
                             f"{GATEWAY_URL}/api/downloads/{artifact_id}",
                             headers={"Authorization": f"Bearer {token}"}
                         )
                         
-                        # Accept both 200 (success) and 403 (permission denied) as valid responses
-                        # 403 is acceptable if the artifact belongs to a different user/model
                         if download_response.status_code == 200:
                             download_data = download_response.json()
                             assert "download_url" in download_data
                             assert download_data["file_size"] > 0
                         elif download_response.status_code == 403:
-                            # Permission denied - this is acceptable if artifact belongs to different user
-                            # Skip the test rather than failing
                             pytest.skip("User does not have permission to download this artifact (403) - likely belongs to different user")
                         else:
-                            # Other error codes are unexpected
                             assert download_response.status_code == 200, f"Unexpected status code: {download_response.status_code}"
             else:
                 pytest.skip("No models found to test download")
@@ -418,17 +363,12 @@ class TestTrainingErrorHandling:
                 "model_id": 999
             }
         )
-        # Allow 400, 404, or 503 (service unavailable)
         assert job_response.status_code in [400, 404, 503]
     
     def test_training_job_with_nonexistent_model(self, token, test_artifacts):
         """Test training job with model_id that doesn't exist"""
         config_file, dataset_file, weights_file = test_artifacts
         
-        # Upload artifacts first
-        # ... (upload logic)
-        
-        # Try to trigger training with nonexistent model_id
         job_response = requests.post(
             f"{GATEWAY_URL}/api/training-jobs",
             headers={
@@ -442,8 +382,6 @@ class TestTrainingErrorHandling:
                 "model_id": 99999
             }
         )
-        # Should either fail or proceed (depending on validation)
-        # Allow 503 if upload/download service is unavailable
         assert job_response.status_code in [202, 400, 404, 503]
     
     def test_download_nonexistent_artifact(self, token):
@@ -452,7 +390,6 @@ class TestTrainingErrorHandling:
             f"{GATEWAY_URL}/api/downloads/sha256:nonexistent123456789",
             headers={"Authorization": f"Bearer {token}"}
         )
-        # Allow 400, 404, or 503 (service unavailable)
         assert download_response.status_code in [400, 404, 503]
     
     def test_training_job_unauthorized(self, test_artifacts):
@@ -486,7 +423,6 @@ class TestModelCatalogQueries:
         if model_response.status_code == 201:
             model_id = model_response.json()["id"]
             
-            # List versions
             versions_response = requests.get(
                 f"{GATEWAY_URL}/api/models/{model_id}/versions"
             )
@@ -495,17 +431,13 @@ class TestModelCatalogQueries:
     
     def test_get_version_by_hash(self):
         """Test getting a version by content hash"""
-        # First, verify the endpoint exists by testing with an invalid hash
-        # This ensures the routing is working correctly
         invalid_hash_response = requests.get(
             f"{GATEWAY_URL}/api/versions/by-hash/sha256:invalid123"
         )
-        # Should return 404 (not found), not 500 (server error) or other errors
         assert invalid_hash_response.status_code == 404, \
             f"Expected 404 for invalid hash, got {invalid_hash_response.status_code}. " \
             f"Response: {invalid_hash_response.text}"
         
-        # Now try to find a model with versions to test with a valid hash
         models_response = requests.get(f"{GATEWAY_URL}/api/models")
         assert models_response.status_code == 200, \
             f"Failed to get models list: {models_response.status_code}"
@@ -514,7 +446,6 @@ class TestModelCatalogQueries:
         models = data["items"] if isinstance(data, dict) and "items" in data else data
         assert isinstance(models, list), "Models response should be a list"
         
-        # Search for a model with versions
         content_hash = None
         for model in models:
             model_id = model["id"]
@@ -527,7 +458,6 @@ class TestModelCatalogQueries:
                     content_hash = versions[0]["content_hash"]
                     break
         
-        # If we found a version, test with valid hash
         if content_hash:
             hash_response = requests.get(
                 f"{GATEWAY_URL}/api/versions/by-hash/{content_hash}"
@@ -539,8 +469,6 @@ class TestModelCatalogQueries:
             assert version_data["content_hash"] == content_hash, \
                 f"Content hash mismatch. Expected {content_hash}, got {version_data.get('content_hash')}"
         else:
-            # If no versions exist, that's okay - we've already verified the endpoint works
-            # by testing with an invalid hash above
             pytest.skip("No model versions found in database to test with valid hash")
     
     def test_list_all_models(self):

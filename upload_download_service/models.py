@@ -3,13 +3,11 @@ Pydantic Models for Request/Response Validation
 ================================================
 
 These models define the API contract for the Upload/Download Service.
-Pydantic provides automatic validation, serialization, and documentation.
+Pydantic provides automatic validation, serialisation, and documentation.
 """
 
 from pydantic import BaseModel, Field
 from typing import List, Optional
-from datetime import datetime
-
 
 class PresignedURL(BaseModel):
     """

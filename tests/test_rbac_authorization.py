@@ -19,11 +19,9 @@ import jwt
 import pytest
 import requests
 
-# Service URLs - All services accessed through API Gateway (security best practice)
 GATEWAY_URL = "http://localhost:8080"
 
-# JWT settings (must match jwt_auth.py)
-SECRET_KEY = "your-secret-key"
+SECRET_KEY = "your-secret-key" # Hardcoded for dev, in prod use .env
 ALGORITHM = "HS256"
 
 
@@ -88,7 +86,6 @@ def test_file():
     
     yield temp_path
     
-    # Cleanup
     if temp_path.exists():
         temp_path.unlink()
 
@@ -118,7 +115,6 @@ def uploaded_artifact_id(user1_headers, test_file, test_model_id):
     file_size = test_file.stat().st_size
     file_hash = _calculate_sha256(test_file)
     
-    # Start upload session
     response = requests.post(
         f"{GATEWAY_URL}/api/uploads",
         json={
@@ -136,7 +132,6 @@ def uploaded_artifact_id(user1_headers, test_file, test_model_id):
     if response.status_code not in [200, 201]:
         pytest.skip(f"Failed to start upload: {response.status_code}")
     
-    # Return the content hash (artifact_id)
     return file_hash
 
 
@@ -144,8 +139,6 @@ def uploaded_artifact_id(user1_headers, test_file, test_model_id):
 def test_ownership_endpoint_requires_auth():
     """Test that ownership endpoint requires authentication"""
     response = requests.get(f"{GATEWAY_URL}/api/models/1/ownership")
-    # Gateway returns 401 for missing authentication, or 422 if endpoint requires X-User-Id
-    # Since we made ownership endpoint require auth, it should be 401
     assert response.status_code in [401, 422], "Should require authentication"
 
 def test_ownership_endpoint_model_not_found(user1_headers):
@@ -200,13 +193,11 @@ def test_ownership_endpoint_response_structure(user1_headers, test_model_id):
     assert response.status_code == 200
     data = response.json()
     
-    # Validate structure
     assert isinstance(data, dict)
     assert "has_access" in data
     assert "is_owner" in data
     assert "model_id" in data
     
-    # Validate types
     assert isinstance(data["has_access"], bool)
     assert isinstance(data["is_owner"], bool)
     assert isinstance(data["model_id"], int)
@@ -214,28 +205,19 @@ def test_ownership_endpoint_response_structure(user1_headers, test_model_id):
 # Upload/Download service authorisation tests
 def test_download_public_access():
     """Test that download endpoint allows public access (no auth required)"""
-    # Use a valid SHA-256 format that doesn't exist (will get 404, not 401)
     fake_artifact_id = "sha256:" + "a" * 64
     response = requests.get(f"{GATEWAY_URL}/api/downloads/{fake_artifact_id}")
-    # Should NOT require authentication (public downloads enabled)
-    # Will get 400 (invalid format) or 404 (not found), but NOT 401 (unauthorized)
     assert response.status_code != 401, "Downloads should be public (no auth required)"
 
 def test_download_nonexistent_artifact(user1_headers):
     """Test download of non-existent artifact"""
-    # Use a valid SHA-256 format (64 hex characters) that doesn't exist in the system
-    fake_artifact_id = "sha256:" + "a" * 64  # Valid format but non-existent
+    fake_artifact_id = "sha256:" + "a" * 64  
     response = requests.get(
         f"{GATEWAY_URL}/api/downloads/{fake_artifact_id}",
         headers=user1_headers,
         timeout=10
     )
     
-    # For authenticated users, authorization check happens first
-    # If artifact doesn't exist in upload sessions, should return 404
-    # If artifact exists but user doesn't have permission, returns 403
-    # 503 is also acceptable if service is temporarily unavailable
-    # Both are valid responses - the important thing is it doesn't return 200
     if response.status_code == 503:
         pytest.skip("Upload/Download service unavailable")
     assert response.status_code in [404, 403], \
@@ -252,8 +234,6 @@ def test_download_owner_can_access(user1_headers, uploaded_artifact_id):
         timeout=10
     )
     
-    # Owner should be able to download (may be 404 if artifact not in storage yet)
-    # But should NOT be 403 (forbidden)
     assert response.status_code != 403, \
         f"Owner should not be forbidden. Got {response.status_code}: {response.text}"
 
@@ -262,26 +242,19 @@ def test_download_non_owner_allowed(user1_headers, user2_headers, uploaded_artif
     if not uploaded_artifact_id:
         pytest.skip("Failed to create test artifact")
     
-    # Wait a moment for upload session to be created
     time.sleep(1)
     
-    # Try to download as user2 (not the owner) - should be denied (RBAC)
-    # Public downloads only work when unauthenticated (no headers)
     response = requests.get(
         f"{GATEWAY_URL}/api/downloads/{uploaded_artifact_id}",
         headers=user2_headers,
         timeout=10
     )
     
-    # Authenticated non-owners should be denied (403)
-    # Public downloads only apply to unauthenticated requests
     assert response.status_code == 403, \
         f"Non-owner should be denied when authenticated. Got {response.status_code}: {response.text}"
 
 def test_download_without_user_id_header():
     """Test that download fails without X-User-Id header"""
-    # This would be caught by the service, not the gateway
-    # Gateway should still require JWT
     token = _make_jwt()
     headers = {"Authorization": f"Bearer {token}"}
     
@@ -291,8 +264,6 @@ def test_download_without_user_id_header():
         timeout=10
     )
     
-    # Should fail - either 401 (gateway) or 422 (service missing header)
-    # 503 if service unavailable
     if response.status_code == 503:
         pytest.skip("Upload/Download service unavailable")
     assert response.status_code in [401, 422, 400], \
@@ -307,7 +278,6 @@ def test_full_rbac_flow_owner_access(user1_headers, test_file, test_model_id):
     file_size = test_file.stat().st_size
     file_hash = _calculate_sha256(test_file)
     
-    # Step 1: Upload (as user1)
     upload_response = requests.post(
         f"{GATEWAY_URL}/api/uploads",
         json={
@@ -331,18 +301,14 @@ def test_full_rbac_flow_owner_access(user1_headers, test_file, test_model_id):
     if not upload_id:
         pytest.skip("Failed to get upload_id")
     
-    # Step 2: Wait for session to be created in DB
     time.sleep(1)
     
-    # Step 3: Try to download as owner (user1)
     download_response = requests.get(
         f"{GATEWAY_URL}/api/downloads/{file_hash}",
         headers=user1_headers,
         timeout=10
     )
     
-    # Should NOT be 403 (owner should have access)
-    # May be 404 if artifact not in storage, but authorization should pass
     assert download_response.status_code != 403, \
         f"Owner should not be forbidden. Got {download_response.status_code}: {download_response.text}"
 
@@ -353,7 +319,6 @@ def test_full_rbac_flow_non_owner_allowed(user1_headers, user2_headers, test_fil
     file_size = test_file.stat().st_size
     file_hash = _calculate_sha256(test_file)
     
-    # Step 1: Upload as user1
     upload_response = requests.post(
         f"{GATEWAY_URL}/api/uploads",
         json={
@@ -371,19 +336,14 @@ def test_full_rbac_flow_non_owner_allowed(user1_headers, user2_headers, test_fil
     if upload_response.status_code not in [200, 201]:
         pytest.skip(f"Failed to start upload: {upload_response.status_code}")
     
-    # Step 2: Wait for session to be created
     time.sleep(1)
     
-    # Step 3: Try to download as user2 (not owner) - should be denied (RBAC)
-    # Public downloads only work when unauthenticated (no headers)
     download_response = requests.get(
         f"{GATEWAY_URL}/api/downloads/{file_hash}",
         headers=user2_headers,
         timeout=10
     )
     
-    # Authenticated non-owners should be denied (403)
-    # Public downloads only apply to unauthenticated requests
     assert download_response.status_code == 403, \
         f"Non-owner should be denied when authenticated. Got {download_response.status_code}: {download_response.text}"
 
@@ -395,7 +355,6 @@ def test_model_level_rbac_access(user1_headers, user2_headers, test_file, test_m
     file_size = test_file.stat().st_size
     file_hash = _calculate_sha256(test_file)
     
-    # Step 1: Upload as user1
     upload_response = requests.post(
         f"{GATEWAY_URL}/api/uploads",
         json={
@@ -415,7 +374,6 @@ def test_model_level_rbac_access(user1_headers, user2_headers, test_file, test_m
     
     time.sleep(1)
     
-    # Step 2: Verify user1 (owner) has model access
     ownership_response = requests.get(
         f"{GATEWAY_URL}/api/models/{test_model_id}/ownership",
         headers=user1_headers
@@ -423,7 +381,6 @@ def test_model_level_rbac_access(user1_headers, user2_headers, test_file, test_m
     assert ownership_response.status_code == 200
     assert ownership_response.json()["has_access"] is True
     
-    # Step 3: Verify user2 (non-owner) does NOT have model access
     ownership_response2 = requests.get(
         f"{GATEWAY_URL}/api/models/{test_model_id}/ownership",
         headers=user2_headers
@@ -431,27 +388,23 @@ def test_model_level_rbac_access(user1_headers, user2_headers, test_file, test_m
     assert ownership_response2.status_code == 200
     assert ownership_response2.json()["has_access"] is False
     
-    # Step 4: Download should be denied (RBAC enforced for authenticated users)
-    # Public downloads only work when unauthenticated (no headers)
     download_response = requests.get(
         f"{GATEWAY_URL}/api/downloads/{file_hash}",
         headers=user2_headers,
         timeout=10
     )
     
-    # Authenticated non-owners should be denied (403)
-    # Public downloads only apply to unauthenticated requests
     assert download_response.status_code == 403, \
         "User should be denied when authenticated and not owner"
 
 # Error handling tests
 def test_authorization_with_invalid_artifact_id(user1_headers):
-    """Test authorization with invalid artifact ID format"""
+    """Test authorisation with invalid artifact ID format"""
     invalid_ids = [
         "",
         "not-a-hash",
-        "sha256:invalid",  # Too short
-        "sha256:" + "a" * 63,  # One char too short
+        "sha256:invalid",  
+        "sha256:" + "a" * 63,  
     ]
     
     for invalid_id in invalid_ids:
@@ -461,16 +414,13 @@ def test_authorization_with_invalid_artifact_id(user1_headers):
             timeout=10
         )
         
-        # Should handle gracefully (404 or 400, not 500)
-        # 503 if service unavailable
         if response.status_code == 503:
             pytest.skip("Upload/Download service unavailable")
         assert response.status_code in [400, 404, 422], \
             f"Should handle invalid ID gracefully. Got {response.status_code} for '{invalid_id}'"
 
 def test_authorization_with_malformed_headers(user1_headers):
-    """Test authorization with malformed or missing headers"""
-    # Missing X-User-Id (should be added by gateway, but test direct service)
+    """Test authorisation with malformed or missing headers"""
     token = _make_jwt()
     headers = {"Authorization": f"Bearer {token}"}
     
@@ -480,14 +430,13 @@ def test_authorization_with_malformed_headers(user1_headers):
         timeout=10
     )
     
-    # Gateway should add X-User-Id, but if it doesn't, service should handle gracefully
     if response.status_code == 503:
         pytest.skip("Upload/Download service unavailable")
     assert response.status_code in [200, 400, 401, 422, 404], \
         "Should handle missing headers gracefully"
 
 def test_concurrent_authorization_checks(user1_headers, uploaded_artifact_id):
-    """Test that authorization works correctly under concurrent requests"""
+    """Test that authorisation works correctly under concurrent requests"""
     if not uploaded_artifact_id:
         pytest.skip("Failed to create test artifact")
     
@@ -501,21 +450,17 @@ def test_concurrent_authorization_checks(user1_headers, uploaded_artifact_id):
         )
         return response.status_code
     
-    # Make 5 concurrent requests
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
         futures = [executor.submit(download_artifact) for _ in range(5)]
         results = [f.result() for f in concurrent.futures.as_completed(futures)]
     
-    # All should succeed (not 403) or all fail consistently
-    # Should not have mixed results (some 403, some 200)
     status_codes = set(results)
     assert len(status_codes) <= 2, \
         f"Concurrent requests should have consistent results. Got: {status_codes}"
 
 # Edge cases
 def test_authorization_with_special_characters_in_artifact_id(user1_headers):
-    """Test authorization with special characters in artifact ID"""
-    # Artifact IDs should be hex, but test edge cases
+    """Test authorisation with special characters in artifact ID"""
     special_ids = [
         "sha256:abc123%20def",
         "sha256:abc123+def",
@@ -529,21 +474,19 @@ def test_authorization_with_special_characters_in_artifact_id(user1_headers):
             timeout=10
         )
         
-        # Should handle gracefully (not crash)
         if response.status_code == 503:
             pytest.skip("Upload/Download service unavailable")
         assert response.status_code in [400, 404, 422], \
             f"Should handle special characters. Got {response.status_code}"
 
 def test_authorization_empty_artifact_id(user1_headers):
-    """Test authorization with empty artifact ID"""
+    """Test authorisation with empty artifact ID"""
     response = requests.get(
         f"{GATEWAY_URL}/api/downloads/",
         headers=user1_headers,
         timeout=10
     )
     
-    # Should return 404 (route not found) or 400 (bad request)
     if response.status_code == 503:
         pytest.skip("Upload/Download service unavailable")
     assert response.status_code in [404, 400, 422], \

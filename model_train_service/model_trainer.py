@@ -3,22 +3,19 @@ import pika
 import pika.exceptions
 import json
 import httpx
-import torch
-import io
 import hashlib
 import time
 import threading
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, Optional
 from pathlib import Path
 import tempfile
 import os
-import sys
 from datetime import datetime, timezone
 import redis
+import asyncio
 
-# Try to import circuit breaker, but provide fallback if not available
 try:
-    from circuitbreaker import circuit, CircuitBreakerError
+    from circuitbreaker import CircuitBreakerError, circuit
     CIRCUIT_BREAKER_AVAILABLE = True
 except ImportError:
     CIRCUIT_BREAKER_AVAILABLE = False
@@ -40,7 +37,6 @@ Handles downloading training files (JSON configs + model weights) from MinIO
 through the Upload/Download Service, triggered by RabbitMQ messages.
 """
 
-# Try to use observability logger, fallback to basic logging
 try:
     from observability import get_logger
     logger = get_logger(__name__)
@@ -48,7 +44,6 @@ except ImportError:
     import logging
     logger = logging.getLogger(__name__)
 
-# Configuration from environment variables
 UPLOAD_DOWNLOAD_SERVICE_URL = os.getenv("UPLOAD_DOWNLOAD_SERVICE_URL", "http://upload-download-service:8002")
 RABBITMQ_HOST = os.getenv("RABBITMQ_HOST", "rabbitmq")
 RABBITMQ_QUEUE = os.getenv("RABBITMQ_QUEUE", "training_jobs")
@@ -56,16 +51,10 @@ RABBITMQ_DLQ = f"{RABBITMQ_QUEUE}_dlq"
 NUM_EPISODES = int(os.getenv("NUM_EPISODES", "50"))
 MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
 
-# Detect if running in Kubernetes (KUBERNETES_SERVICE_HOST is automatically set in K8s pods)
 IS_KUBERNETES = os.getenv("KUBERNETES_SERVICE_HOST") is not None
-# MinIO endpoint replacement: in Kubernetes, replace localhost with internal service name
 MINIO_INTERNAL_ENDPOINT = os.getenv("MINIO_INTERNAL_ENDPOINT", "minio:9000")
 
-# Redis configuration for job status tracking
-# Auto-detect environment: Kubernetes uses redis-master, Docker Compose uses redis
-# Detect if running in Kubernetes (KUBERNETES_SERVICE_HOST is automatically set in K8s pods)
 IS_KUBERNETES = os.getenv("KUBERNETES_SERVICE_HOST") is not None
-# Use appropriate default based on environment
 _DEFAULT_REDIS_HOST = "redis-master" if IS_KUBERNETES else "redis"
 REDIS_HOST = os.getenv("REDIS_HOST", _DEFAULT_REDIS_HOST)
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
@@ -73,30 +62,25 @@ REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
 REDIS_SENTINEL_HOSTS = os.getenv("REDIS_SENTINEL_HOSTS", "")
 REDIS_SENTINEL_MASTER_NAME = os.getenv("REDIS_SENTINEL_MASTER_NAME", "mymaster")
 
-# Global HTTP client with connection pooling
 _http_client: Optional[httpx.AsyncClient] = None
 _http_client_lock = threading.Lock()
 
 def get_http_client() -> httpx.AsyncClient:
     """Get or create global HTTP client with connection pooling"""
     global _http_client
-    # Check if client exists and is not closed
     if _http_client is None or _http_client.is_closed:
         with _http_client_lock:
-            # Double-check after acquiring lock
             if _http_client is None or _http_client.is_closed:
-                # Close old client if it exists but is closed
                 if _http_client is not None:
                     try:
-                        # Don't await here - just mark for cleanup
                         pass
                     except Exception:
                         pass
                 _http_client = httpx.AsyncClient(
                     timeout=httpx.Timeout(60.0, connect=10.0),
                     limits=httpx.Limits(
-                        max_connections=100,  # REVERTED: Back to original (was 200 in Phase 2)
-                        max_keepalive_connections=50,  # REVERTED: Back to original (was 100 in Phase 2)
+                        max_connections=100,  
+                        max_keepalive_connections=50, 
                         keepalive_expiry=30.0
                     )
                 )
@@ -113,7 +97,6 @@ def get_http_client_status() -> str:
     except Exception:
         return "offline"
 
-# Global RabbitMQ connection for health checks
 _rabbitmq_connection: Optional[pika.BlockingConnection] = None
 _rabbitmq_connection_lock = threading.Lock()
 
@@ -122,7 +105,6 @@ def get_rabbitmq_connection_status() -> str:
     global _rabbitmq_connection
     try:
         if _rabbitmq_connection is not None and not _rabbitmq_connection.is_closed:
-            # Try to check if channel is still open
             try:
                 channel = _rabbitmq_connection.channel()
                 channel.close()
@@ -134,7 +116,6 @@ def get_rabbitmq_connection_status() -> str:
         return "offline"
 
 
-# Global Redis client for job status tracking
 _redis_client: Optional[redis.Redis] = None
 _redis_client_lock = threading.Lock()
 
@@ -145,7 +126,6 @@ def get_redis_client() -> Optional[redis.Redis]:
         with _redis_client_lock:
             if _redis_client is None:
                 try:
-                    # Try Sentinel first if configured
                     if REDIS_SENTINEL_HOSTS and REDIS_SENTINEL_MASTER_NAME:
                         from redis.sentinel import Sentinel
                         
@@ -176,7 +156,6 @@ def get_redis_client() -> Optional[redis.Redis]:
                         _redis_client.ping()
                         logger.info("Redis connected via Sentinel for job status tracking")
                     else:
-                        # Fallback to direct connection
                         _redis_client = redis.Redis(
                             host=REDIS_HOST,
                             port=REDIS_PORT,
@@ -198,7 +177,7 @@ class JobStatusTracker:
     
     def __init__(self):
         self.redis = get_redis_client()
-        self.ttl = 86400  # 24 hours
+        self.ttl = 86400  
     
     def create_job(self, job_id: str, user_id: str, model_id: Optional[int] = None):
         """Create job status entry"""
@@ -324,12 +303,11 @@ class ResilientRabbitMQConnection:
                     heartbeat=600,
                     blocked_connection_timeout=300,
                     connection_attempts=1,
-                    retry_delay=0  # We handle retries ourselves
+                    retry_delay=0 
                 )
                 self._connection = pika.BlockingConnection(parameters)
                 self._channel = self._connection.channel()
                 
-                # Store globally for health checks
                 with _rabbitmq_connection_lock:
                     _rabbitmq_connection = self._connection
                 
@@ -346,7 +324,7 @@ class ResilientRabbitMQConnection:
                 return
             except Exception as e:
                 if attempt < self._max_retries - 1:
-                    delay = min(self._retry_delay * (2 ** attempt), 60)  # Exponential backoff, max 60s
+                    delay = min(self._retry_delay * (2 ** attempt), 60)  
                     logger.warning(
                         f"RabbitMQ connection failed, retrying in {delay}s",
                         extra={
@@ -380,7 +358,6 @@ class ResilientRabbitMQConnection:
                 if not self._channel.is_closed:
                     self._channel.stop_consuming()
             except (IndexError, AttributeError) as e:
-                # Handle pika internal deque errors during cleanup
                 logger.debug(f"Ignoring pika channel cleanup error (likely deque issue): {e}")
             except Exception as e:
                 logger.debug(f"Error stopping channel consumption: {e}")
@@ -390,31 +367,27 @@ class ResilientRabbitMQConnection:
                 if not self._connection.is_closed:
                     self._connection.close()
             except (IndexError, AttributeError) as e:
-                # Handle pika internal deque errors during cleanup
                 logger.debug(f"Ignoring pika connection cleanup error (likely deque issue): {e}")
             except Exception as e:
                 logger.debug(f"Error closing connection: {e}")
         
-        # Reset state
         self._connection = None
         self._channel = None
     
     def setup_queue_with_dlq(self):
         """Setup queue with dead letter queue"""
-        # Declare DLQ first
         try:
             self._channel.queue_declare(
                 queue=RABBITMQ_DLQ,
                 durable=True,
                 arguments={
-                    'x-message-ttl': 86400000,  # 24 hours
-                    'x-max-length': 10000  # Max 10k messages
+                    'x-message-ttl': 86400000,  
+                    'x-max-length': 10000  
                 }
             )
         except Exception as e:
             logger.debug(f"DLQ may already exist: {e}")
         
-        # Check if main queue exists by trying passive declaration
         queue_exists = False
         try:
             method = self._channel.queue_declare(queue=self.queue, passive=True, durable=True)
@@ -424,14 +397,12 @@ class ResilientRabbitMQConnection:
                 extra={"event": "queue_exists", "queue": self.queue, "message_count": method.method.message_count}
             )
         except pika.exceptions.ChannelClosedByBroker as e:
-            # Queue doesn't exist or different args - need to recreate
             queue_exists = False
             logger.info(f"Queue {self.queue} doesn't exist or has different configuration, will create with DLQ")
         except Exception as e:
             queue_exists = False
             logger.debug(f"Queue check failed: {e}")
         
-        # If queue doesn't exist, create it with DLQ
         if not queue_exists:
             try:
                 self._channel.queue_declare(
@@ -440,7 +411,7 @@ class ResilientRabbitMQConnection:
                     arguments={
                         'x-dead-letter-exchange': '',
                         'x-dead-letter-routing-key': RABBITMQ_DLQ,
-                        'x-max-priority': 10  # Support priority
+                        'x-max-priority': 10  
                     }
                 )
                 logger.info(
@@ -453,14 +424,11 @@ class ResilientRabbitMQConnection:
                 )
             except Exception as e:
                 logger.error(f"Failed to create queue with DLQ: {e}")
-                # Fallback: just declare without DLQ args
                 try:
                     self._channel.queue_declare(queue=self.queue, durable=True)
                 except Exception as e2:
                     logger.error(f"Failed to create queue: {e2}")
         else:
-            # Queue exists - just declare it without args (won't change existing args)
-            # This ensures the queue is available but doesn't modify it
             try:
                 self._channel.queue_declare(queue=self.queue, durable=True)
                 logger.info(f"Queue {self.queue} is ready (existing queue, DLQ not configured)")
@@ -473,15 +441,10 @@ class ResilientRabbitMQConnection:
             try:
                 self.ensure_connected()
                 
-                # Setup queue with DLQ
                 self.setup_queue_with_dlq()
                 
-                # Set QoS - allow multiple unacked messages for better throughput
-                # With async processing, we can handle multiple jobs concurrently
-                # Increased from 1 to 3 to allow concurrent processing while preventing overload
                 self._channel.basic_qos(prefetch_count=3)
                 
-                # Set up consumer with callback
                 self._channel.basic_consume(
                     queue=self.queue,
                     on_message_callback=callback
@@ -492,7 +455,6 @@ class ResilientRabbitMQConnection:
                     extra={"event": "rabbitmq_consumer_started", "queue": self.queue}
                 )
                 
-                # Start consuming (blocks until connection lost or stopped)
                 self._channel.start_consuming()
                 
             except pika.exceptions.AMQPConnectionError as e:
@@ -503,9 +465,8 @@ class ResilientRabbitMQConnection:
                     f"RabbitMQ connection error, reconnecting...",
                     extra={"event": "rabbitmq_reconnecting", "error": str(e)}
                 )
-                # Clean up connection state safely
                 self._cleanup_connection()
-                time.sleep(5)  # Wait before reconnecting
+                time.sleep(5)  
             except KeyboardInterrupt:
                 logger.info("Consumer interrupted by user")
                 break
@@ -513,7 +474,6 @@ class ResilientRabbitMQConnection:
                 if self._should_stop:
                     logger.info("Consumer stopped (shutdown requested)")
                     break
-                # Handle pika deque errors gracefully
                 if isinstance(e, IndexError) and 'deque' in str(e).lower():
                     logger.debug(f"Pika internal deque error (likely during connection cleanup): {e}")
                 else:
@@ -522,17 +482,14 @@ class ResilientRabbitMQConnection:
                         extra={"event": "rabbitmq_consumer_error", "error": str(e)},
                         exc_info=True
                     )
-                # Clean up connection state safely
                 self._cleanup_connection()
                 time.sleep(5)
         
-        # Cleanup - handle pika internal deque errors gracefully
         if self._channel:
             try:
                 if not self._channel.is_closed:
                     self._channel.stop_consuming()
             except (IndexError, AttributeError) as e:
-                # Handle pika internal deque errors during cleanup
                 logger.debug(f"Ignoring pika cleanup error (likely deque issue): {e}")
             except Exception as e:
                 logger.debug(f"Error stopping channel consumption: {e}")
@@ -542,7 +499,6 @@ class ResilientRabbitMQConnection:
                 if not self._connection.is_closed:
                     self._connection.close()
             except (IndexError, AttributeError) as e:
-                # Handle pika internal deque errors during cleanup
                 logger.debug(f"Ignoring pika cleanup error (likely deque issue): {e}")
             except Exception as e:
                 logger.debug(f"Error closing connection: {e}")
@@ -557,7 +513,6 @@ class ResilientRabbitMQConnection:
                 if not self._channel.is_closed:
                     self._channel.stop_consuming()
             except (IndexError, AttributeError) as e:
-                # Handle pika internal deque errors during cleanup
                 logger.debug(f"Ignoring pika cleanup error (likely deque issue): {e}")
             except Exception as e:
                 logger.debug(f"Error stopping channel: {e}")
@@ -595,15 +550,11 @@ class ArtifactDownloader:
             extra={"artifact_id": artifact_id, "artifact_type": "json"}
         )
         
-        # Get presigned URL from upload/download service (with circuit breaker)
         headers = {}
         if self.user_id:
             headers["X-User-Id"] = self.user_id
         
         try:
-            # Always request internal endpoint URL for service-to-service access
-            # In both Docker Compose and Kubernetes, services need minio:9000 (not localhost:9000)
-            # localhost:9000 only works for browsers running on the host machine
             params = {"expires_in": 3600, "internal": "true"}
             response = await self._download_with_circuit_breaker(
                 f"{self.service_url}/downloads/{artifact_id}",
@@ -626,19 +577,15 @@ class ArtifactDownloader:
         download_info = response.json()
         presigned_url = download_info["download_url"]
         
-        # No need to replace hostname - URL is already generated with correct endpoint
-        # (internal endpoint since internal=true was requested)
-        
         logger.info(
             f"Got presigned URL",
             extra={
                 "artifact_id": artifact_id,
                 "expires_at": download_info.get("expires_at"),
-                "url_preview": presigned_url[:100]  # Log URL preview for debugging
+                "url_preview": presigned_url[:100]  
             }
         )
         
-        # Download actual file from MinIO (with circuit breaker)
         try:
             file_response = await self._download_with_circuit_breaker(presigned_url, {})
         except CircuitBreakerError:
@@ -654,7 +601,6 @@ class ArtifactDownloader:
             )
             raise
         
-        # Parse JSON
         json_data = file_response.json()
         logger.info(
             f"Successfully downloaded and parsed JSON",
@@ -679,15 +625,11 @@ class ArtifactDownloader:
             extra={"artifact_id": artifact_id, "artifact_type": "pytorch_model"}
         )
         
-        # Get presigned URL (with circuit breaker)
         headers = {}
         if self.user_id:
             headers["X-User-Id"] = self.user_id
         
         try:
-            # Always request internal endpoint URL for service-to-service access
-            # In both Docker Compose and Kubernetes, services need minio:9000 (not localhost:9000)
-            # localhost:9000 only works for browsers running on the host machine
             params = {"expires_in": 3600, "internal": "true"}
             response = await self._download_with_circuit_breaker(
                 f"{self.service_url}/downloads/{artifact_id}",
@@ -711,9 +653,6 @@ class ArtifactDownloader:
         presigned_url = download_info["download_url"]
         file_size = download_info.get("file_size", 0)
         
-        # No need to replace hostname - URL is already generated with correct endpoint
-        # (internal endpoint since internal=true was requested)
-        
         logger.info(
             f"Downloading model file",
             extra={
@@ -722,15 +661,12 @@ class ArtifactDownloader:
             }
         )
         
-        # Download file with streaming (for large files)
         client = get_http_client()
         try:
             async with client.stream("GET", presigned_url) as file_response:
                 file_response.raise_for_status()
                 
-                # Determine save path
                 if save_path is None:
-                    # Create temp file
                     temp_file = tempfile.NamedTemporaryFile(
                         delete=False, 
                         suffix=".pth"
@@ -738,14 +674,12 @@ class ArtifactDownloader:
                     save_path = temp_file.name
                     temp_file.close()
                 
-                # Stream download to file (async I/O)
                 try:
                     import aiofiles
                     async with aiofiles.open(save_path, "wb") as f:
                         async for chunk in file_response.aiter_bytes(chunk_size=8192):
                             await f.write(chunk)
                 except ImportError:
-                    # Fallback: use sync file I/O with asyncio.to_thread (slower)
                     def write_file():
                         with open(save_path, "wb") as f:
                             for chunk in file_response.iter_bytes(chunk_size=8192):
@@ -783,9 +717,6 @@ class ArtifactDownloader:
         if self.user_id:
             headers["X-User-Id"] = self.user_id
         
-        # Always request internal endpoint URL for service-to-service access
-        # In both Docker Compose and Kubernetes, services need minio:9000 (not localhost:9000)
-        # localhost:9000 only works for browsers running on the host machine
         params = {"expires_in": 3600, "internal": "true"}
         response = await client.get(
             f"{self.service_url}/downloads/{artifact_id}",
@@ -795,8 +726,6 @@ class ArtifactDownloader:
         response.raise_for_status()
         
         presigned_url = response.json()["download_url"]
-        
-        # No need to replace hostname - URL is already generated with internal endpoint
         
         file_response = await client.get(presigned_url)
         file_response.raise_for_status()
@@ -859,17 +788,13 @@ class ArtifactUploader:
         
         logger.info(f"Uploading {filename} ({Path(filepath).stat().st_size} bytes)")
         
-        # Step 1: Calculate file hash
         file_size = Path(filepath).stat().st_size
         file_hash = self.calculate_sha256(filepath)
         logger.info(f"File hash: {file_hash}")
         
-        # Step 2: Initiate upload session
         client = get_http_client()
         headers = {"X-User-Id": self.user_id}
         
-        # Request internal endpoint URLs for service-to-service access
-        # In both Docker Compose and Kubernetes, services need minio:9000 (not localhost:9000)
         init_response = await client.post(
             f"{self.service_url}/uploads?internal=true",
             json={
@@ -893,11 +818,10 @@ class ArtifactUploader:
             extra={
                 "upload_id": upload_id,
                 "chunk_count": len(presigned_urls),
-                "file_name": filename  # Changed from 'filename' to avoid LogRecord conflict
+                "file_name": filename  
             }
         )
         
-        # Step 3: Upload chunks directly to MinIO (async file I/O)
         parts = []
         try:
             import aiofiles
@@ -906,12 +830,10 @@ class ArtifactUploader:
                     part_number = url_data["part_number"]
                     url = url_data["url"]
                     
-                    # Read chunk (async)
                     chunk = await f.read(chunk_size)
                     if not chunk:
                         break
                     
-                    # Upload chunk directly to MinIO
                     logger.debug(
                         f"Uploading chunk",
                         extra={
@@ -923,14 +845,12 @@ class ArtifactUploader:
                     chunk_response = await client.put(url, content=chunk)
                     chunk_response.raise_for_status()
                     
-                    # Get ETag
                     etag = chunk_response.headers.get("ETag", "").strip('"')
                     parts.append({
                         "part_number": part_number,
                         "etag": etag
                     })
         except ImportError:
-            # Fallback: use sync file I/O with asyncio.to_thread (slower)
             def read_and_upload_chunks():
                 chunks_data = []
                 with open(filepath, "rb") as f:
@@ -938,7 +858,7 @@ class ArtifactUploader:
                         part_number = url_data["part_number"]
                         url = url_data["url"]
                         
-                        # Read chunk
+                        # ead chunk
                         chunk = f.read(chunk_size)
                         if not chunk:
                             break
@@ -947,7 +867,6 @@ class ArtifactUploader:
             
             chunks_data = await asyncio.to_thread(read_and_upload_chunks)
             
-            # Upload chunks (async HTTP, but chunks already read)
             for part_number, url, chunk in chunks_data:
                 logger.debug(
                     f"Uploading chunk",
@@ -960,14 +879,12 @@ class ArtifactUploader:
                 chunk_response = await client.put(url, content=chunk)
                 chunk_response.raise_for_status()
                 
-                # Get ETag
                 etag = chunk_response.headers.get("ETag", "").strip('"')
                 parts.append({
                     "part_number": part_number,
                     "etag": etag
                 })
         
-        # Step 4: Complete upload
         logger.info("Completing upload", extra={"upload_id": upload_id})
         complete_response = await client.post(
             f"{self.service_url}/uploads/{upload_id}/complete",
@@ -992,7 +909,6 @@ class ArtifactUploader:
 class TrainingJobHandler:
     
     def __init__(self):
-        # Don't create downloader here create per job with user_id
         self.job_tracker = JobStatusTracker()
     
     async def process_training_job(self, message: Dict[str, Any]):
@@ -1011,7 +927,6 @@ class TrainingJobHandler:
         user_id = message.get("user_id")
         model_id = message.get("model_id")
         
-        # Create job status entry
         self.job_tracker.create_job(job_id, user_id, model_id)
         
         logger.info(
@@ -1024,18 +939,14 @@ class TrainingJobHandler:
             }
         )
         
-        # Update status to processing
         self.job_tracker.update_status(job_id, "processing", progress=0.0)
         
-        # Create downloader with user_id for proper authorization
         downloader = ArtifactDownloader(
             service_url=UPLOAD_DOWNLOAD_SERVICE_URL,
             user_id=user_id
         )
         
         try:
-            # Validate artifacts exist (now in worker, not API endpoint)
-            # This prevents wasting time downloading non-existent artifacts
             artifact_ids = [
                 ("config", message["config_artifact_id"]),
                 ("dataset", message["dataset_artifact_id"]),
@@ -1045,12 +956,9 @@ class TrainingJobHandler:
             client = get_http_client()
             for name, artifact_id in artifact_ids:
                 try:
-                    # Check existence without downloading (HEAD request)
-                    # For training jobs, we allow using artifacts if user has access to the training job's model
-                    # Pass model_id as query parameter to allow cross-model artifact usage for training
                     params = {}
                     if model_id:
-                        params["model_id"] = model_id  # Allow access if user has access to training job's model
+                        params["model_id"] = model_id  
                     response = await client.head(
                         f"{UPLOAD_DOWNLOAD_SERVICE_URL}/downloads/{artifact_id}",
                         headers={"X-User-Id": user_id},
@@ -1063,7 +971,7 @@ class TrainingJobHandler:
                             error=error_msg
                         )
                         logger.error(f"Job {job_id} failed validation: {error_msg}")
-                        return  # Early exit
+                        return 
                 except Exception as e:
                     error_msg = f"Artifact validation failed: {name} - {str(e)}"
                     self.job_tracker.update_status(
@@ -1071,7 +979,7 @@ class TrainingJobHandler:
                         error=error_msg
                     )
                     logger.error(f"Job {job_id} failed validation: {error_msg}")
-                    return  # Early exit
+                    return  
             
             logger.info(
                 f"All artifacts validated",
@@ -1080,9 +988,6 @@ class TrainingJobHandler:
                     "event": "artifacts_validated"
                 }
             )
-            
-            # Download all artifacts in parallel (for efficiency)
-            import asyncio
             
             config_task = downloader.download_json(
                 message["config_artifact_id"]
@@ -1094,12 +999,27 @@ class TrainingJobHandler:
                 message["model_artifact_id"]
             )
             
-            # Wait for all downloads to complete
             training_config, dataset_config, model_path = await asyncio.gather(
                 config_task,
                 dataset_task,
                 model_task
             )
+            
+            if "layers" not in training_config and "grid_height" in training_config:
+                if "layers" in dataset_config and "grid_height" not in dataset_config:
+                    logger.warning(
+                        f"Configs appear to be swapped, correcting...",
+                        extra={"job_id": job_id}
+                    )
+                    training_config, dataset_config = dataset_config, training_config
+                else:
+                    error_msg = (
+                        f"Config structure mismatch: training_config has dataset fields "
+                        f"(keys: {list(training_config.keys())}), "
+                        f"dataset_config keys: {list(dataset_config.keys())}"
+                    )
+                    logger.error(f"Job {job_id} failed: {error_msg}")
+                    raise ValueError(error_msg)
             
             logger.info(
                 f"All artifacts downloaded",
@@ -1111,13 +1031,11 @@ class TrainingJobHandler:
                 }
             )
             
-            # Create uploader for uploading trained weights
             uploader = ArtifactUploader(
                 service_url=UPLOAD_DOWNLOAD_SERVICE_URL,
                 user_id=user_id
             )
             
-            # Now use the files in your training function
             trained_weights_path = await self.run_training(
                 training_config=training_config,
                 dataset_config=dataset_config,
@@ -1127,7 +1045,6 @@ class TrainingJobHandler:
                 model_id=model_id
             )
             
-            # Upload trained weights if training succeeded
             if trained_weights_path:
                 try:
                     if model_id:
@@ -1166,7 +1083,6 @@ class TrainingJobHandler:
                                 },
                                 exc_info=True
                             )
-                            # Don't fail the job if upload fails - training succeeded
                     else:
                         logger.warning(
                             f"model_id not provided, skipping trained weights upload",
@@ -1176,7 +1092,6 @@ class TrainingJobHandler:
                             }
                         )
                 finally:
-                    # Clean up temporary file
                     if Path(trained_weights_path).exists():
                         try:
                             Path(trained_weights_path).unlink()
@@ -1190,7 +1105,6 @@ class TrainingJobHandler:
                                 extra={"job_id": job_id, "file_path": trained_weights_path, "error": str(e)}
                             )
             
-            # Update status to completed
             self.job_tracker.update_status(job_id, "completed", progress=1.0)
             
             logger.info(
@@ -1202,7 +1116,6 @@ class TrainingJobHandler:
             )
             
         except Exception as e:
-            # Update status to failed
             error_msg = str(e)
             self.job_tracker.update_status(job_id, "failed", error=error_msg)
             
@@ -1249,13 +1162,53 @@ class TrainingJobHandler:
             }
         )
 
+        logger.info(
+            f"Validating training config",
+            extra={
+                "job_id": job_id,
+                "config_keys": list(training_config.keys()) if isinstance(training_config, dict) else "not a dict",
+                "config_type": str(type(training_config))
+            }
+        )
+        
+        if not isinstance(training_config, dict):
+            error_msg = f"training_config must be a dictionary, got {type(training_config)}"
+            logger.error(f"Job {job_id} failed: {error_msg}")
+            raise ValueError(error_msg)
+        
+        if "layers" not in training_config:
+            error_msg = (
+                f"training_config missing required 'layers' field. "
+                f"Config keys: {list(training_config.keys())}"
+            )
+            logger.error(f"Job {job_id} failed: {error_msg}")
+            raise ValueError(error_msg)
+        
+        if not isinstance(training_config["layers"], list):
+            error_msg = f"training_config['layers'] must be a list, got {type(training_config['layers'])}"
+            logger.error(f"Job {job_id} failed: {error_msg}")
+            raise ValueError(error_msg)
+
+        if "shape" not in training_config:
+            grid_height = dataset_config.get("grid_height", 10)
+            grid_width = dataset_config.get("grid_width", 10)
+            training_config["shape"] = [3, grid_height, grid_width]
+            logger.info(
+                f"Derived shape from grid_params",
+                extra={
+                    "job_id": job_id,
+                    "shape": training_config["shape"],
+                    "grid_height": grid_height,
+                    "grid_width": grid_width
+                }
+            )
+
         # Agent expects: (grid_params, dqn_config, model_weights_path)
         # grid_params = dataset_config (maze/grid configuration)
         # dqn_config = training_config (model architecture configuration)
         agent = Agent(dataset_config, training_config, model_path)
         agent.train_step(num_episodes=NUM_EPISODES)
         
-        # Save trained weights to temporary file
         trained_weights_path = tempfile.NamedTemporaryFile(
             delete=False,
             suffix=f"_{job_id}.pth",
@@ -1283,7 +1236,6 @@ class TrainingJobHandler:
                 },
                 exc_info=True
             )
-            # Clean up temp file if it was created
             if Path(trained_weights_path).exists():
                 Path(trained_weights_path).unlink()
             return None
@@ -1298,11 +1250,9 @@ def on_message_callback(ch, method, properties, body, handler: TrainingJobHandle
     """
     job_id = None
     try:
-        # Parse message
         message = json.loads(body)
         job_id = message.get("job_id", "unknown")
         
-        # Get retry count from headers
         retry_count = 0
         if properties.headers:
             retry_count = properties.headers.get('x-retry-count', 0)
@@ -1326,19 +1276,15 @@ def on_message_callback(ch, method, properties, body, handler: TrainingJobHandle
         # We reset the global client before each asyncio.run() to ensure it's created in the
         # correct event loop context.
         import asyncio
-        # Reset HTTP client before creating new event loop
-        # This ensures the client is created fresh in the new loop's context
         global _http_client
         with _http_client_lock:
-            _http_client = None  # Force recreation in new event loop
+            _http_client = None  
         try:
             asyncio.run(handler.process_training_job(message))
         finally:
-            # Clean up: reset client after loop closes to ensure fresh client for next job
             with _http_client_lock:
                 _http_client = None
         
-        # Acknowledge message on success
         ch.basic_ack(delivery_tag=method.delivery_tag)
         logger.info(
             f"Message acknowledged",
@@ -1363,17 +1309,14 @@ def on_message_callback(ch, method, properties, body, handler: TrainingJobHandle
             exc_info=True
         )
         
-        # Get retry count
         retry_count = 0
         if properties.headers:
             retry_count = properties.headers.get('x-retry-count', 0)
         
         if retry_count < MAX_RETRIES:
-            # Retry with incremented count
             new_headers = properties.headers.copy() if properties.headers else {}
             new_headers['x-retry-count'] = retry_count + 1
             
-            # Reject and requeue
             ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
             logger.info(
                 f"Retrying job",
@@ -1385,14 +1328,13 @@ def on_message_callback(ch, method, properties, body, handler: TrainingJobHandle
                 }
             )
         else:
-            # Send to DLQ after max retries
             try:
                 ch.basic_publish(
                     exchange='',
                     routing_key=RABBITMQ_DLQ,
                     body=body,
                     properties=pika.BasicProperties(
-                        delivery_mode=2,  # Persistent
+                        delivery_mode=2, 
                         headers={
                             'original_queue': RABBITMQ_QUEUE,
                             'failed_at': datetime.now(timezone.utc).isoformat(),
@@ -1412,7 +1354,6 @@ def on_message_callback(ch, method, properties, body, handler: TrainingJobHandle
                     }
                 )
             except Exception as dlq_error:
-                # If DLQ publish fails, still ack to prevent infinite loop
                 logger.error(
                     f"Failed to send job to DLQ, acknowledging anyway",
                     extra={
@@ -1438,15 +1379,12 @@ def start_consumer():
         }
     )
     
-    # Initialize handler (downloader created per job with user_id)
     handler = TrainingJobHandler()
     
-    # Get RabbitMQ connection parameters
     rabbitmq_user = os.getenv("RABBITMQ_USER", "admin")
     rabbitmq_pass = os.getenv("RABBITMQ_PASS", "admin_password")
     rabbitmq_port = int(os.getenv("RABBITMQ_PORT", "5672"))
     
-    # Create resilient connection
     resilient_connection = ResilientRabbitMQConnection(
         host=RABBITMQ_HOST,
         port=rabbitmq_port,
@@ -1457,11 +1395,9 @@ def start_consumer():
         retry_delay=5
     )
     
-    # Create callback wrapper
     def callback_wrapper(ch, method, properties, body):
         on_message_callback(ch, method, properties, body, handler)
     
-    # Start consuming with automatic reconnection
     try:
         resilient_connection.start_consuming_with_retry(callback_wrapper)
     except KeyboardInterrupt:

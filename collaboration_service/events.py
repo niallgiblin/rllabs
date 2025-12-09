@@ -85,6 +85,20 @@ def publish_comment_created(comment_data: dict):
             print(f"RabbitMQ not available, skipping CommentCreated event for comment {comment_data.get('id')}")
             return
         
+        try:
+            if channel.is_closed:
+                print("Channel is closed, reconnecting...")
+                connection, channel = get_rabbitmq_connection()
+                if connection is None or channel is None:
+                    print(f"RabbitMQ not available after reconnect, skipping CommentCreated event")
+                    return
+        except (AttributeError, IndexError):
+            print("Channel state check failed, reconnecting...")
+            connection, channel = get_rabbitmq_connection()
+            if connection is None or channel is None:
+                print(f"RabbitMQ not available after reconnect, skipping CommentCreated event")
+                return
+        
         event = {
             "eventType": "CommentCreated",
             "timestamp": datetime.utcnow().isoformat(),
@@ -102,6 +116,11 @@ def publish_comment_created(comment_data: dict):
         )
         
         print(f"Published CommentCreated event for comment {comment_data.get('id')}")
+    except (pika.exceptions.ChannelClosed, pika.exceptions.ConnectionClosed) as e:
+        print(f"RabbitMQ channel/connection closed, skipping CommentCreated event: {e}")
+        global _rabbitmq_connection, _rabbitmq_channel
+        _rabbitmq_connection = None
+        _rabbitmq_channel = None
     except Exception as e:
         print(f"Failed to publish CommentCreated event: {e}")
 

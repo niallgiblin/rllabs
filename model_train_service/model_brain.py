@@ -1,6 +1,4 @@
-import torch
 import torch.nn as nn
-import json
 from functools import reduce
 import operator
 
@@ -32,7 +30,6 @@ class ModelBrain(nn.Module):
               raise ValueError(f"Unsupported layer type: {layer_type}")
 
           if layer_type == "Linear":
-              # Infer in_features if missing
               if "in_features" not in layer_cfg:
                   if len(shape) > 1:
                       in_features = reduce(operator.mul, shape)
@@ -45,7 +42,6 @@ class ModelBrain(nn.Module):
           layer_class = LAYER_MAP[layer_type]
           layers.append(layer_class(**layer_cfg) if layer_cfg else layer_class())
 
-          # Update shape for next layer
           if layer_type == "Conv2d":
               C, H, W = shape
               kernel = layer_cfg.get("kernel_size", 1)

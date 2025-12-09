@@ -1421,11 +1421,7 @@ Model Catalog → Publish ModelCreated event
   # MongoDB
   docker compose exec mongo1 mongosh --port 27017
   ```
-- Helper scripts available in `scripts/`:
-  - `./scripts/access_postgres.sh`
-  - `./scripts/access_redis.sh`
-  - `./scripts/access_rabbitmq_ui.sh` (for Management UI port info)
-  - `./scripts/access_mongodb.sh`
+
 - **MinIO** remains exposed at http://localhost:9000 (required for presigned URLs)
 
 **Kubernetes/Kind:**

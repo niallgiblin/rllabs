@@ -15,7 +15,7 @@ How Distributed Tracing Works:
 1. When a request enters the API Gateway, a unique trace_id is generated
 2. This trace_id is propagated via headers (traceparent) to downstream services
 3. Each service creates "spans" representing operations (HTTP calls, DB queries)
-4. All spans with the same trace_id are collected and visualized in Jaeger
+4. All spans with the same trace_id are collected and visualised in Jaeger
 
 Usage:
     from shared.observability import setup_tracing, get_tracer
@@ -23,14 +23,14 @@ Usage:
     # At service startup (before FastAPI app is created)
     setup_tracing(service_name="api-gateway")
     
-    # In your code (for custom spans)
+    # In the code (for custom spans)
     tracer = get_tracer(__name__)
     
     with tracer.start_as_current_span("custom_operation") as span:
         span.set_attribute("user.id", user_id)
-        # ... your code ...
+        # ... the code ...
 
-Environment Variables:
+Environment Vars:
     OTEL_EXPORTER_OTLP_ENDPOINT: Jaeger OTLP endpoint (default: http://jaeger:4317)
     OTEL_TRACES_SAMPLER: Sampling strategy (default: always_on)
     TRACING_ENABLED: Set to "false" to disable tracing
@@ -43,7 +43,6 @@ from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
 
-# Global tracer provider (set by setup_tracing)
 _tracer_provider = None
 _initialized = False
 
@@ -64,7 +63,7 @@ def setup_tracing(
         sample_rate: Fraction of traces to sample (0.0 to 1.0, default 1.0 = all)
     
     Returns:
-        True if tracing was initialized, False if disabled or unavailable
+        True if tracing was initialised, False if disabled or unavailable
     
     Example:
         # At the very start of main.py
@@ -72,17 +71,14 @@ def setup_tracing(
         
         setup_tracing(service_name="api-gateway")
         
-        app = FastAPI(...)  # Now auto-instrumented!
+        app = FastAPI(...)  # Now auto-instrumented
     """
     global _tracer_provider, _initialized
     
-    # Check if tracing is disabled
     if os.getenv("TRACING_ENABLED", "true").lower() == "false":
         logger.info("Distributed tracing is disabled (TRACING_ENABLED=false)")
         return False
     
-    # Avoid double initialization
-    # Check if tracing is disabled via environment variable
     if os.getenv("TRACING_ENABLED", "true").lower() == "false":
         logger.info("Tracing disabled via TRACING_ENABLED=false")
         return False
@@ -99,51 +95,40 @@ def setup_tracing(
         from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
         from opentelemetry.sdk.trace.sampling import TraceIdRatioBased
         
-        # Get Jaeger endpoint from env or parameter
         endpoint = jaeger_endpoint or os.getenv(
             "OTEL_EXPORTER_OTLP_ENDPOINT",
             "http://jaeger:4317"
         )
         
-        # Create resource with service name
         resource = Resource.create({
             SERVICE_NAME: service_name,
             "deployment.environment": os.getenv("ENVIRONMENT", "development")
         })
         
-        # Create sampler (controls what percentage of traces are recorded)
         sampler = TraceIdRatioBased(sample_rate)
         
-        # Create and configure tracer provider
         _tracer_provider = TracerProvider(
             resource=resource,
             sampler=sampler
         )
         
-        # Create OTLP exporter (sends spans to Jaeger)
-        # Add timeout to prevent hanging on slow/unavailable Jaeger
         otlp_exporter = OTLPSpanExporter(
             endpoint=endpoint,
-            insecure=True,  # Use insecure for local/Kind cluster
-            timeout=1.0  # 1 second timeout - fail fast if Jaeger is slow
+            insecure=True,  
+            timeout=1.0  
         )
         
-        # Add batch processor with error handling
-        # max_queue_size: Maximum number of spans to queue before dropping
-        # export_timeout_millis: Timeout for export operations
         _tracer_provider.add_span_processor(
             BatchSpanProcessor(
                 otlp_exporter,
-                max_queue_size=2048,  # Queue up to 2048 spans
-                export_timeout_millis=1000,  # 1 second export timeout
-                schedule_delay_millis=5000  # Batch every 5 seconds
+                max_queue_size=2048, 
+                export_timeout_millis=1000, 
+                schedule_delay_millis=5000  
             )
         )
         
-        # Set as global tracer provider
         trace.set_tracer_provider(_tracer_provider)
         
-        # Auto-instrument common libraries
         _instrument_libraries()
         
         _initialized = True
@@ -180,7 +165,6 @@ def _instrument_libraries() -> None:
     - pika (RabbitMQ operations)
     """
     
-    # Instrument FastAPI
     try:
         from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
         FastAPIInstrumentor().instrument()
@@ -190,7 +174,6 @@ def _instrument_libraries() -> None:
     except Exception as e:
         logger.warning(f"Failed to instrument FastAPI: {e}")
     
-    # Instrument httpx (for outgoing HTTP calls)
     try:
         from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
         HTTPXClientInstrumentor().instrument()
@@ -200,7 +183,6 @@ def _instrument_libraries() -> None:
     except Exception as e:
         logger.warning(f"Failed to instrument httpx: {e}")
     
-    # Instrument SQLAlchemy (database queries)
     try:
         from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
         SQLAlchemyInstrumentor().instrument()
@@ -210,7 +192,6 @@ def _instrument_libraries() -> None:
     except Exception as e:
         logger.warning(f"Failed to instrument SQLAlchemy: {e}")
     
-    # Instrument Redis
     try:
         from opentelemetry.instrumentation.redis import RedisInstrumentor
         RedisInstrumentor().instrument()
@@ -220,7 +201,6 @@ def _instrument_libraries() -> None:
     except Exception as e:
         logger.warning(f"Failed to instrument Redis: {e}")
     
-    # Instrument pika (RabbitMQ)
     try:
         from opentelemetry.instrumentation.pika import PikaInstrumentor
         PikaInstrumentor().instrument()
@@ -256,7 +236,6 @@ def get_tracer(name: str):
         from opentelemetry import trace
         return trace.get_tracer(name)
     except ImportError:
-        # Return a no-op tracer if OpenTelemetry not installed
         return _NoOpTracer()
 
 
@@ -335,4 +314,3 @@ def extract_trace_context(headers: dict):
         return extract(headers)
     except ImportError:
         return None
-

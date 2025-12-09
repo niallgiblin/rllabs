@@ -1,5 +1,5 @@
 # Shared Observability Dependencies
-# ==================================
+
 # Add these to each service's requirements.txt
 
 # Structured JSON logging

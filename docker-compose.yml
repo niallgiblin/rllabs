@@ -1,25 +1,3 @@
-# RLLabs Docker Compose Configuration
-# ====================================
-# SECURITY ARCHITECTURE:
-# - All application services (Model Catalog, Upload/Download, Collaboration) are NOT directly exposed
-# - All client requests must go through the API Gateway (port 8080)
-# - This enforces centralized authentication, rate limiting, circuit breakers, and user context propagation
-#
-# INFRASTRUCTURE SERVICES SECURITY:
-# - PostgreSQL (5432), Redis (6379), RabbitMQ (5672/15672), MongoDB (27017-27019):
-#   * NOT exposed to host network (aligned with Kubernetes security model)
-#   * Only accessible within Docker network via service names (e.g., postgres:5432)
-#   * For debugging: Use "docker compose exec <service> <command>" or create temporary port-forward
-#   * This matches production deployment patterns where services are cluster-internal only
-#   * Future: Implement mTLS for inter-service communication in production deployments
-#
-# - MinIO (9000/9001):
-#   * MUST be exposed for presigned URL direct client-to-storage transfers
-#   * Authorization happens BEFORE presigned URL generation (secure)
-#   * Clients download directly from MinIO after receiving authorized presigned URLs
-#   * This is an architectural requirement for performance (bypasses backend bottleneck)
-#   * Future: Consider MinIO behind reverse proxy with TLS, IP allowlisting, shorter URL expiration
-
 services:
   # API Gateway - Single Entry Point for All Client Requests
   api-gateway:
@@ -40,15 +18,12 @@ services:
     networks:
       - rllabs-network
 
-  # Model Catalog Service (AP System)
-  # SECURITY: Not exposed directly - all access must go through API Gateway (port 8080)
-  # This enforces centralized authentication, rate limiting, and circuit breakers
+  # Model Catalog Service
   model-catalog-service:
     build:
       context: .
       dockerfile: ./model_catalog_service/Dockerfile
     container_name: model-catalog-service
-    # No ports exposed - accessible only via internal Docker network through API Gateway
     environment:
       - DATABASE_URL=postgresql://rllabs:rllabs_password@postgres/model_catalog_db
       - REDIS_HOST=redis
@@ -70,33 +45,25 @@ services:
       - ./model_catalog_service:/app
 
   # Upload/Download Service
-  # SECURITY: Not exposed directly - all access must go through API Gateway (port 8080)
-  # This enforces centralized authentication, rate limiting, and circuit breakers
   upload-download-service:
     build:
       context: .
       dockerfile: ./upload_download_service/Dockerfile
     container_name: upload-download-service
-    # No ports exposed - accessible only via internal Docker network through API Gateway
     environment:
-      # MinIO Configuration
       - MINIO_ENDPOINT=minio:9000
       - MINIO_PUBLIC_ENDPOINT=localhost:9000
       - MINIO_ACCESS_KEY=minioadmin
       - MINIO_SECRET_KEY=minioadmin_password
       - MINIO_BUCKET=models
       - MINIO_USE_SSL=false
-      # PostgreSQL Configuration
       - DATABASE_URL=postgresql://rllabs:rllabs_password@postgres/upload_download_db
-      # Redis Configuration
       - REDIS_HOST=redis
       - REDIS_PORT=6379
-      # RabbitMQ Configuration
       - RABBITMQ_HOST=rabbitmq
       - RABBITMQ_PORT=5672
       - RABBITMQ_USER=admin
       - RABBITMQ_PASS=admin_password
-      # Service URLs
       - MODEL_CATALOG_URL=http://model-catalog-service:8000
     depends_on:
       postgres:
@@ -119,15 +86,12 @@ services:
       dockerfile: ./model_train_service/Dockerfile
     container_name: model-train-service
     environment:
-      # Upload/Download Service URL for downloading artifacts
       - UPLOAD_DOWNLOAD_SERVICE_URL=http://upload-download-service:8002
-      # RabbitMQ Configuration
       - RABBITMQ_HOST=rabbitmq
       - RABBITMQ_PORT=5672
       - RABBITMQ_USER=admin
       - RABBITMQ_PASS=admin_password
       - RABBITMQ_QUEUE=training_jobs
-      # Redis Configuration for Job Status Tracking
       - REDIS_HOST=redis
       - REDIS_PORT=6379
     depends_on:
@@ -141,8 +105,6 @@ services:
       - ./model_train_service:/app
 
   # PostgreSQL Database for Model Catalog Service (Metadata) and Upload/Download
-  # SECURITY: Not exposed to host - accessible only within Docker network
-  # For debugging: docker compose exec postgres_db psql -U rllabs -d model_catalog_db
   postgres:
     image: postgres:13
     container_name: postgres_db
@@ -151,30 +113,22 @@ services:
       POSTGRES_PASSWORD: rllabs_password
       POSTGRES_DB: model_catalog_db
       POSTGRES_MULTIPLE_DATABASES: upload_download_db
-      # CRITICAL: Increase max_connections to handle connection pools from multiple services
-      # With connection pools of 40 per pod, we need at least 300 connections
-      # to account for multiple pods, read replicas, and system overhead
       POSTGRES_MAX_CONNECTIONS: "300"
-    # No ports exposed - accessible only via internal Docker network
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./postgres-init/create-multiple-databases.sh:/docker-entrypoint-initdb.d/create-multiple-databases.sh
     networks:
       - rllabs-network
     healthcheck:
-      # Use default database (postgres) for health check - pg_isready doesn't need a specific DB
       test: ["CMD-SHELL", "pg_isready -U rllabs -d postgres"]
       interval: 10s
       timeout: 5s
       retries: 5
 
   # Redis for Caching and Rate Limiting
-  # SECURITY: Not exposed to host - accessible only within Docker network
-  # For debugging: docker compose exec redis_cache redis-cli
   redis:
     image: redis:7-alpine
     container_name: redis_cache
-    # No ports exposed - accessible only via internal Docker network
     networks:
       - rllabs-network
     healthcheck:
@@ -184,21 +138,12 @@ services:
       retries: 5
 
   # RabbitMQ for Asynchronous Messaging
-  # SECURITY: Not exposed to host - accessible only within Docker network
-  # For debugging: 
-  #   - CLI: docker compose exec rabbitmq_messaging rabbitmq-diagnostics status
-  #   - Management UI: docker compose port rabbitmq 15672 (then access returned port)
   rabbitmq:
     image: rabbitmq:3-management-alpine
     container_name: rabbitmq_messaging
     environment:
       RABBITMQ_DEFAULT_USER: admin
       RABBITMQ_DEFAULT_PASS: admin_password
-    # No ports exposed - accessible only via internal Docker network
-    # Volume temporarily removed due to macOS Docker Desktop permission issues
-    # Uncomment below and remove volume if you need persistence:
-    # volumes:
-    #   - rabbitmq_data:/var/lib/rabbitmq
     networks:
       - rllabs-network
     healthcheck:
@@ -247,7 +192,7 @@ services:
       exit 0;
       "
 
-  # Frontend Dev - Vite dev server with hot reload (for development)
+  # Frontend Dev - Vite dev server with hot reload for speedier development
   frontend:
     build:
       context: ./frontend
@@ -266,35 +211,11 @@ services:
     networks:
       - rllabs-network
 
-  # Frontend Production (optional - for production builds)
-  # Uncomment to use production build with nginx instead of Vite dev server
-  # frontend-prod:
-  #   build:
-  #     context: ./frontend
-  #     args:
-  #       VITE_API_BASE_URL: http://localhost:8080
-  #   container_name: frontend-prod
-  #   ports:
-  #     - "5173:80"
-  #   depends_on:
-  #     api-gateway:
-  #       condition: service_started
-  #   networks:
-  #     - rllabs-network
-  #   healthcheck:
-  #     test: ["CMD", "curl", "-f", "http://localhost/health"]
-  #     interval: 30s
-  #     timeout: 10s
-  #     retries: 3
-
-  # MongoDB Replica Set for Collaboration Service (CP Configuration)
-  # SECURITY: Not exposed to host - accessible only within Docker network
-  # For debugging: docker compose exec mongo1 mongosh --port 27017
+  # MongoDB Replica Set for Collaboration Service
   mongo1:
     image: mongo:7.0
     container_name: mongo1
     command: ["--replSet", "rs0", "--bind_ip_all", "--port", "27017"]
-    # No ports exposed - accessible only via internal Docker network
     volumes:
       - mongo1_data:/data/db
       - mongo1_config:/data/configdb
@@ -312,7 +233,6 @@ services:
     image: mongo:7.0
     container_name: mongo2
     command: ["--replSet", "rs0", "--bind_ip_all", "--port", "27018"]
-    # No ports exposed - accessible only via internal Docker network
     volumes:
       - mongo2_data:/data/db
       - mongo2_config:/data/configdb
@@ -325,7 +245,6 @@ services:
     image: mongo:7.0
     container_name: mongo3
     command: ["--replSet", "rs0", "--bind_ip_all", "--port", "27019"]
-    # No ports exposed - accessible only via internal Docker network
     volumes:
       - mongo3_data:/data/db
       - mongo3_config:/data/configdb
@@ -335,14 +254,11 @@ services:
       - mongo1
 
   # Collaboration Service
-  # SECURITY: Not exposed directly - all access must go through API Gateway (port 8080)
-  # This enforces centralized authentication, rate limiting, and circuit breakers
   collaboration-service:
     build:
       context: .
       dockerfile: ./collaboration_service/dockerfile
     container_name: collaboration-service
-    # No ports exposed - accessible only via internal Docker network through API Gateway
     environment:
       - MONGO_URI=mongodb://mongo1:27017,mongo2:27018,mongo3:27019/?replicaSet=rs0
       - REDIS_HOST=redis

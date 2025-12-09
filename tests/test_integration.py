@@ -13,15 +13,13 @@ import pytest
 import requests
 
 GATEWAY_URL = "http://localhost:8080"
-# All services accessed through API Gateway (security best practice)
-# RabbitMQ connection handled by rabbitmq_helpers to support both docker-compose and kubernetes
+
 import sys
 import os
 sys.path.insert(0, os.path.dirname(__file__))
 from rabbitmq_helpers import get_rabbitmq_connection_or_skip
 
-# Must match jwt_auth.py for local dev
-SECRET_KEY = "your-secret-key"
+SECRET_KEY = "your-secret-key" #Harcoded for ease in local dev, in production use env var
 ALGORITHM = "HS256"
 
 
@@ -53,7 +51,6 @@ def test_connectivity():
 
 def test_protected_without_auth_is_401():
     """Test that protected write operations require authentication"""
-    # GET /api/models is now public, so test with a protected endpoint (POST)
     r = requests.post(f"{GATEWAY_URL}/api/models", json={"name": "test"})
     assert r.status_code == 401, "Write operations should require authentication"
 
@@ -65,13 +62,11 @@ def test_create_and_version_via_gateway():
     token = _make_jwt()
     headers = {"Authorization": f"Bearer {token}"}
 
-    # Create model
     unique_name = f"it-model-{int(time.time())}-{os.urandom(2).hex()}"
     create_payload = {"name": unique_name, "description": "Created via gateway integration test"}
     r = requests.post(f"{GATEWAY_URL}/api/models", json=create_payload, headers=headers)
     assert r.status_code in [201, 503]
     if r.status_code == 503:
-        # Backend temporarily unavailable through gateway
         return
     model = r.json()
     assert model["name"] == unique_name
@@ -79,7 +74,6 @@ def test_create_and_version_via_gateway():
 
     model_id = model["id"]
 
-    # Register version 1
     v1 = {"version": 1, "storage_path": "path/to/v1", "content_hash": "hash_v1"}
     rv1 = requests.post(f"{GATEWAY_URL}/api/models/{model_id}/versions", json=v1, headers=headers)
     assert rv1.status_code in [201, 503]
@@ -87,7 +81,6 @@ def test_create_and_version_via_gateway():
         return
     assert rv1.json()["version"] == 1
 
-    # Latest path
     latest = requests.get(f"{GATEWAY_URL}/api/models/{model_id}/latest", headers=headers)
     assert latest.status_code in [200, 404, 503]
     if latest.status_code == 200:
@@ -101,36 +94,29 @@ def test_rabbitmq_connectivity():
 
 def test_model_created_event_published():
     """Test that ModelCreated event is published to RabbitMQ when model is created"""
-    # Setup RabbitMQ consumer
     connection = get_rabbitmq_connection_or_skip()
     channel = connection.channel()
     
-    # Declare exchange
     channel.exchange_declare(
         exchange='model_events',
         exchange_type='topic',
         durable=True
     )
     
-    # Create temporary queue
     result = channel.queue_declare(queue='test-events', exclusive=True)
     queue_name = result.method.queue
     
-    # Bind to model.created events
     channel.queue_bind(
         exchange='model_events',
         queue=queue_name,
         routing_key='model.created'
     )
     
-    # Purge any existing messages
     channel.queue_purge(queue_name)
     
-    # Create a model - try gateway first, fallback to direct catalog
     unique_name = f"event-test-{int(time.time())}-{os.urandom(2).hex()}"
     create_response = None
     
-    # Try via gateway first
     token = _make_jwt()
     headers = {"Authorization": f"Bearer {token}"}
     
@@ -144,10 +130,8 @@ def test_model_created_event_published():
     except Exception:
         pass
     
-    # If gateway fails, try direct catalog service (event publishing happens in catalog)
     if not create_response or create_response.status_code != 201:
         try:
-            # Use gateway with JWT token
             token = _make_jwt(sub="it-test-user")
             headers = {"Authorization": f"Bearer {token}"}
             create_response = requests.post(
@@ -164,23 +148,19 @@ def test_model_created_event_published():
         connection.close()
         pytest.skip(f"Model creation failed ({create_response.status_code}), cannot test event publishing")
     
-    # Wait a sec for event to be published (async operation)
-    time.sleep(1.0)  # Increased wait time for async event
+    time.sleep(1.0)  
     
-    # Check for message in queue with retry
     method_frame = None
-    for _ in range(3):  # Retry up to 3 times
+    for _ in range(3):  
         method_frame, properties, body = channel.basic_get(queue=queue_name, auto_ack=True)
         if method_frame is not None:
             break
-        time.sleep(0.5)  # Wait before retry
+        time.sleep(0.5)  
     
     if method_frame is None:
         connection.close()
-        # Event publishing not be fully integrated yet, don't fail test
         pytest.skip("No event received (event publishing may be disabled or delayed)")
     
-    # Parse message
     event = json.loads(body)
     assert event["event_type"] == "ModelCreated"
     assert event["model_name"] == unique_name
@@ -191,8 +171,6 @@ def test_model_created_event_published():
 
 def test_rabbitmq_graceful_degradation():
     """Test that service continues working even if RabbitMQ fails"""
-    # This test verifies that model creation still works
-    # Even if event publish fails
     token = _make_jwt()
     headers = {"Authorization": f"Bearer {token}"}
     
@@ -204,40 +182,32 @@ def test_rabbitmq_graceful_degradation():
         headers=headers
     )
     
-    # Should succeed even if RabbitMQ is down
     assert create_response.status_code == 201
     model = create_response.json()
     assert model["name"] == unique_name
 
 def test_rabbitmq_artifact_event():
     """Test that ArtifactCommitted events are published to RabbitMQ"""
-    # Setup RabbitMQ consumer for artifact events
     connection = get_rabbitmq_connection_or_skip()
     channel = connection.channel()
     
-    # Declare artifact_events exchange
     channel.exchange_declare(
         exchange='artifact_events',
         exchange_type='topic',
         durable=True
     )
     
-    # Create temporary queue
     result = channel.queue_declare(queue='test-artifact-events', exclusive=True)
     queue_name = result.method.queue
     
-    # Bind to artifact.committed events
     channel.queue_bind(
         exchange='artifact_events',
         queue=queue_name,
         routing_key='artifact.committed'
     )
     
-    # Purge any existing messages
     channel.queue_purge(queue_name)
     
-    # Publish a test artifact event (simulating upload completion)
-    # In a real scenario, this would come from the upload service
     test_event = {
         "event_type": "ArtifactCommitted",
         "artifact_id": f"test-artifact-{int(time.time())}",
@@ -254,22 +224,19 @@ def test_rabbitmq_artifact_event():
         routing_key='artifact.committed',
         body=json.dumps(test_event),
         properties=pika.BasicProperties(
-            delivery_mode=2,  # Persistent
+            delivery_mode=2,  
             content_type='application/json'
         )
     )
     
-    # Wait for message to be delivered
     time.sleep(0.5)
     
-    # Check for message in queue
     method_frame, properties, body = channel.basic_get(queue=queue_name, auto_ack=True)
     
     if method_frame is None:
         connection.close()
         pytest.skip("Artifact event not received (event publishing may be disabled)")
     
-    # Parse and verify message
     event = json.loads(body)
     assert event["event_type"] == "ArtifactCommitted"
     assert event["artifact_id"] == test_event["artifact_id"]

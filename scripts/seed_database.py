@@ -4,11 +4,6 @@ Seed Database with Test Models
 ===============================
 
 Creates a batch of models in the database for load testing.
-This is better than running pytest because:
-- Models persist (pytest might clean up)
-- More control over quantity and variety
-- Faster than running full test suite
-- Can be run multiple times safely
 
 Usage:
     # Seed with 100 models
@@ -27,7 +22,7 @@ import time
 import uuid
 import sys
 import os
-from typing import List, Optional
+from typing import Optional
 
 try:
     import requests
@@ -35,21 +30,17 @@ except ImportError:
     print("Error: 'requests' library not found. Install it with: pip install requests")
     sys.exit(1)
 
-# Default gateway URL (can be overridden)
-GATEWAY_URL = "http://localhost:8080"  # Default to port 8080
+GATEWAY_URL = "http://localhost:8080"  
 if "KUBERNETES_SERVICE_HOST" in os.environ:
-    # Running in Kubernetes
     GATEWAY_URL = "http://api-gateway:8080"
 
 def generate_token(gateway_url: str) -> Optional[str]:
     """Generate a JWT token for authentication"""
     try:
-        # Use a consistent username for seeding (so we can reuse if it exists)
         username = "seed-user"
         email = "seed-user@seed.example.com"
         password = "seed_password_123"
         
-        # First, try to login (in case user already exists)
         try:
             response = requests.post(
                 f"{gateway_url}/api/auth/login",
@@ -66,9 +57,8 @@ def generate_token(gateway_url: str) -> Optional[str]:
                 if token:
                     return token
         except Exception as e:
-            pass  # Login failed, try register
+            pass  
         
-        # Register new user
         response = requests.post(
             f"{gateway_url}/api/auth/register",
             json={
@@ -85,7 +75,6 @@ def generate_token(gateway_url: str) -> Optional[str]:
             if token:
                 return token
         else:
-            # If register failed, try login one more time (user might have been created)
             try:
                 response = requests.post(
                     f"{gateway_url}/api/auth/login",
@@ -139,13 +128,11 @@ def create_model(gateway_url: str, token: Optional[str], model_num: int, with_ve
             model_id = model.get("id")
             
             if with_versions and model_id:
-                # Create a few versions
-                for version_num in range(1, 4):  # Create 3 versions
+                for version_num in range(1, 4):  
                     try:
-                        # Version must be an integer, not a string
                         version_data = {
-                            "version": version_num,  # Integer, not string
-                            "content_hash": f"sha256:{uuid.uuid4().hex}",  # SHA-256 hash format
+                            "version": version_num,  
+                            "content_hash": f"sha256:{uuid.uuid4().hex}",
                             "storage_path": f"models/{model_id}/v{version_num}.0.0/model.pkl"
                         }
                         
@@ -200,29 +187,26 @@ def main():
     
     args = parser.parse_args()
     
-    # Use the provided gateway URL or default
     gateway_url = args.gateway_url
     
-    print(f"🌱 Seeding database with {args.count} models...")
-    print(f"   Gateway URL: {gateway_url}")
-    print(f"   With versions: {args.with_versions}")
+    print(f"Seeding database with {args.count} models...")
+    print(f"Gateway URL: {gateway_url}")
+    print(f"With versions: {args.with_versions}")
     print()
     
-    # Generate token
-    print("🔑 Generating authentication token...")
+    print("Generating authentication token...")
     token = generate_token(gateway_url)
     if token:
-        print("   ✓ Token generated")
+        print("✓ Token generated")
     else:
-        print("   ⚠ No token - requests may fail if auth required")
+        print("⚠ No token - requests may fail if auth required")
     print()
     
-    # Create models
     created = 0
     failed = 0
     start_time = time.time()
     
-    print(f"📦 Creating {args.count} models...")
+    print(f"Creating {args.count} models...")
     for i in range(1, args.count + 1):
         model = create_model(gateway_url, token, i, args.with_versions)
         if model:
@@ -232,7 +216,6 @@ def main():
         else:
             failed += 1
         
-        # Small delay to avoid overwhelming the system
         if i % args.batch_size == 0:
             time.sleep(0.1)
     
@@ -240,7 +223,7 @@ def main():
     
     print()
     print("=" * 60)
-    print("✅ Seeding Complete!")
+    print("Seeding Complete!")
     print("=" * 60)
     print(f"   Created: {created} models")
     print(f"   Failed: {failed} models")
@@ -249,14 +232,13 @@ def main():
     print()
     
     if created > 0:
-        print("💡 You can now run load tests with existing models:")
+        print("You can now run load tests with existing models:")
         print(f"   python tests/comprehensive_load_test.py --users 10 --duration 60")
         print()
-        print("💡 Check models in database:")
+        print("Check models in database:")
         print(f"   curl {gateway_url}/api/models | jq '. | length'")
     
     sys.exit(0 if failed == 0 else 1)
 
 if __name__ == "__main__":
     main()
-

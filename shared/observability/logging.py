@@ -14,7 +14,7 @@ Usage:
     # At service startup
     setup_logging(service_name="api-gateway")
     
-    # In your code
+    # In the code
     logger = get_logger(__name__)
     logger.info("User logged in", extra={"user_id": "123", "action": "login"})
 
@@ -39,7 +39,6 @@ from datetime import datetime, timezone
 from typing import Optional, Any, Dict
 
 
-# Global service name (set by setup_logging)
 _SERVICE_NAME: str = "unknown"
 
 
@@ -57,7 +56,6 @@ class StructuredJsonFormatter(logging.Formatter):
     """
     
     def format(self, record: logging.LogRecord) -> str:
-        # Base log structure
         log_entry: Dict[str, Any] = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "level": record.levelname,
@@ -66,7 +64,6 @@ class StructuredJsonFormatter(logging.Formatter):
             "message": record.getMessage(),
         }
         
-        # Add source location for errors
         if record.levelno >= logging.WARNING:
             log_entry["source"] = {
                 "file": record.pathname,
@@ -74,17 +71,13 @@ class StructuredJsonFormatter(logging.Formatter):
                 "function": record.funcName
             }
         
-        # Add exception info if present
         if record.exc_info:
             log_entry["exception"] = self.formatException(record.exc_info)
         
-        # Inject trace context from OpenTelemetry (if available)
         trace_context = _get_trace_context()
         if trace_context:
             log_entry.update(trace_context)
         
-        # Add any extra fields passed to the logger
-        # Skip internal logging fields
         skip_fields = {
             'name', 'msg', 'args', 'created', 'filename', 'funcName',
             'levelname', 'levelno', 'lineno', 'module', 'msecs',
@@ -95,7 +88,6 @@ class StructuredJsonFormatter(logging.Formatter):
         
         for key, value in record.__dict__.items():
             if key not in skip_fields and not key.startswith('_'):
-                # Handle non-serializable objects
                 try:
                     json.dumps(value)
                     log_entry[key] = value
@@ -124,9 +116,9 @@ def _get_trace_context() -> Optional[Dict[str, str]]:
                     "span_id": format(ctx.span_id, '016x'),
                 }
     except ImportError:
-        pass  # OpenTelemetry not installed
+        pass  
     except Exception:
-        pass  # Any other error, fail silently
+        pass  
     
     return None
 
@@ -154,25 +146,19 @@ def setup_logging(
     global _SERVICE_NAME
     _SERVICE_NAME = service_name
     
-    # Get the root logger
     root_logger = logging.getLogger()
     
-    # Clear any existing handlers
     root_logger.handlers.clear()
     
-    # Set log level (allow override from environment)
     env_level = os.getenv("LOG_LEVEL", level).upper()
     root_logger.setLevel(getattr(logging, env_level, logging.INFO))
     
-    # Create console handler
     handler = logging.StreamHandler(sys.stdout)
     handler.setLevel(root_logger.level)
     
     if json_output:
-        # Use JSON formatter for production (Loki-friendly)
         handler.setFormatter(StructuredJsonFormatter())
     else:
-        # Human-readable format for local development
         formatter = logging.Formatter(
             f'%(asctime)s | {service_name} | %(levelname)s | %(name)s | %(message)s'
         )
@@ -180,17 +166,14 @@ def setup_logging(
     
     root_logger.addHandler(handler)
     
-    # Reduce noise from common libraries
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
     logging.getLogger("botocore").setLevel(logging.WARNING)
     logging.getLogger("aiobotocore").setLevel(logging.WARNING)
-    # Suppress pika's verbose internal error logging (deque errors are handled gracefully)
     logging.getLogger("pika").setLevel(logging.WARNING)
     
-    # Log startup message
     root_logger.info(
         f"Structured logging initialized",
         extra={
@@ -217,7 +200,6 @@ def get_logger(name: str) -> logging.Logger:
     return logging.getLogger(name)
 
 
-# Convenience class for adding context to all logs in a scope
 class LogContext:
     """
     Context manager for adding fields to all logs within a scope.

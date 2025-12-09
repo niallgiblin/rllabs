@@ -5,11 +5,9 @@ import os
 from datetime import datetime, timedelta, timezone
 import jwt
 
-# Config - Use API Gateway for all API calls (including health checks)
 GATEWAY_URL = "http://localhost:8080"
 
-# JWT settings (must match jwt_auth.py)
-SECRET_KEY = "your-secret-key"
+SECRET_KEY = "your-secret-key" # Hardcoded for local dev, prod use .env
 ALGORITHM = "HS256"
 
 def _make_jwt(sub: str = "test_user", scopes=("api:read", "api:write")) -> str:
@@ -23,7 +21,6 @@ def _make_jwt(sub: str = "test_user", scopes=("api:read", "api:write")) -> str:
     }
     return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
-# Generate token and create headers
 _token = _make_jwt()
 HEADERS = {"Authorization": f"Bearer {_token}"}
 
@@ -33,7 +30,6 @@ def wait_for_services():
     max_retries = 15
     for i in range(max_retries):
         try:
-            # Check gateway health - it proxies to backend services
             response = requests.get(f"{GATEWAY_URL}/health", timeout=5)
             if response.status_code == 200:
                 print(f"API Gateway ready: {response.json()}")
@@ -56,15 +52,12 @@ def created_model_id(test_model_name):
     model_id = response.json()["id"]
     return model_id
 
-# Healthcheck tests
 def test_health_check():
     # Gateway health check - verifies API Gateway is operational
     # Backend service health is verified through gateway routing
     response = requests.get(f"{GATEWAY_URL}/health")
     assert response.status_code == 200
     data = response.json()
-    # Gateway health endpoint structure may differ from backend services
-    # Main goal is to verify gateway is accessible and routing requests
     assert "status" in data or "service_status" in data or response.status_code == 200
 
 # Model creation tests
@@ -76,7 +69,7 @@ def test_create_model_success(test_model_name):
     assert model_data["name"] == test_model_name
     assert model_data["description"] == "A newly created model."
     assert "id" in model_data
-    assert model_data["created_by"] == "test_user"  # JWT sub claim
+    assert model_data["created_by"] == "test_user"  
 
 def test_create_model_duplicate_name(created_model_id, test_model_name):
     payload = {"name": test_model_name, "description": "Attempting a duplicate."}
@@ -87,7 +80,7 @@ def test_create_model_duplicate_name(created_model_id, test_model_name):
 def test_create_model_missing_auth(test_model_name):
     payload = {"name": test_model_name, "description": "Model without auth."}
     response = requests.post(f"{GATEWAY_URL}/api/models", json=payload)
-    assert response.status_code == 401  # Unauthorized without JWT
+    assert response.status_code == 401  
 
 # List model tests
 def test_list_models_empty():
@@ -116,7 +109,7 @@ def test_list_models_with_data(created_model_id, test_model_name):
     
     # Second try: Search through paginated results
     page = 1
-    while page <= 10:  # Limit to 10 pages to avoid infinite loop
+    while page <= 10:  
         response = requests.get(f"{GATEWAY_URL}/api/models", headers=HEADERS, params={"page": page, "page_size": 50})
         assert response.status_code == 200
         data = response.json()
@@ -124,16 +117,11 @@ def test_list_models_with_data(created_model_id, test_model_name):
         if any(model["name"] == test_model_name for model in models):
             found = True
             break
-        # Check if there are more pages
         if isinstance(data, dict) and data.get("total_pages", 1) <= page:
             break
         page += 1
     
-    # If not found in paginated results, it might be a cache issue - verify model exists
     if not found:
-        # Model exists (we verified above), so this is likely a cache/pagination issue
-        # This is acceptable - the model was created successfully, just not in the list yet
-        # In production, cache will eventually update
         pytest.skip(f"Model '{test_model_name}' (ID: {created_model_id}) exists but not in paginated list - likely cache timing issue")
 
 # Model details tests
@@ -181,7 +169,6 @@ def test_register_duplicate_model_version(created_model_id):
     }
     response = requests.post(f"{GATEWAY_URL}/api/models/{created_model_id}/versions", json=payload_dup, headers=HEADERS)
     assert response.status_code == 409
-    # Check for either the specific version message or the generic duplicate message
     detail = response.json()["detail"]
     assert ("Version 1 already exists" in detail or 
             "This model version or content hash already exists" in detail or
@@ -196,13 +183,11 @@ def test_register_model_version_model_not_found():
     }
     response = requests.post(f"{GATEWAY_URL}/api/models/{non_existent_id}/versions", json=payload, headers=HEADERS)
     assert response.status_code == 404
-    # Gateway may return different error format
     detail = response.json().get("detail", "")
     assert "not found" in detail.lower() or "Model not found" in detail
 
 # Latest model path tests
 def test_get_latest_model_path_success(created_model_id):
-    # Register multiple versions
     requests.post(f"{GATEWAY_URL}/api/models/{created_model_id}/versions", json={"version": 1, "storage_path": "path/v1", "content_hash": "hash_v1"}, headers=HEADERS)
     requests.post(f"{GATEWAY_URL}/api/models/{created_model_id}/versions", json={"version": 2, "storage_path": "path/v2", "content_hash": "hash_v2"}, headers=HEADERS)
     requests.post(f"{GATEWAY_URL}/api/models/{created_model_id}/versions", json={"version": 3, "storage_path": "path/v3", "content_hash": "hash_v3"}, headers=HEADERS)
@@ -221,14 +206,12 @@ def test_get_latest_model_path_model_not_found():
     response = requests.get(f"{GATEWAY_URL}/api/models/{non_existent_id}/latest", headers=HEADERS)
     assert response.status_code == 404
     detail = response.json()["detail"]
-    # API now returns "Model not found" if model doesn't exist, "No versions found" if model exists but has no versions
     assert "Model not found" in detail or "No versions found" in detail
 
 # Ownership tests
 def test_ownership_endpoint_requires_auth(created_model_id):
     """Test that ownership endpoint requires authentication"""
     response = requests.get(f"{GATEWAY_URL}/api/models/{created_model_id}/ownership")
-    # Gateway requires JWT, so should be 401 or 422
     assert response.status_code in [401, 422], "Should require authentication"
 
 def test_ownership_endpoint_owner_has_access(created_model_id):
@@ -276,13 +259,11 @@ def test_ownership_endpoint_response_structure(created_model_id):
     assert response.status_code == 200
     data = response.json()
     
-    # Validate structure
     assert isinstance(data, dict)
     assert "has_access" in data
     assert "is_owner" in data
     assert "model_id" in data
     
-    # Validate types
     assert isinstance(data["has_access"], bool)
     assert isinstance(data["is_owner"], bool)
     assert isinstance(data["model_id"], int)
@@ -307,14 +288,12 @@ def test_get_model_details_public_no_auth(created_model_id, test_model_name):
 
 def test_get_latest_model_path_public_no_auth(created_model_id):
     """Test that GET /models/{id}/latest works without authentication"""
-    # Register a version first
     requests.post(
         f"{GATEWAY_URL}/api/models/{created_model_id}/versions",
         json={"version": 1, "storage_path": "path/v1", "content_hash": "hash_v1"},
         headers=HEADERS
     )
     
-    # Should work without auth
     response = requests.get(f"{GATEWAY_URL}/api/models/{created_model_id}/latest")
     assert response.status_code == 200
     assert response.json()["storage_path"] == "path/v1"
@@ -330,13 +309,11 @@ def test_delete_model_owner(created_model_id):
     )
     assert response.status_code == 204, f"Owner should be able to delete: {response.status_code} - {response.text}"
     
-    # Verify model is deleted
     response = requests.get(f"{GATEWAY_URL}/api/models/{created_model_id}")
     assert response.status_code == 404
 
 def test_delete_model_admin(created_model_id):
     """Test that admin can delete any model"""
-    # Create a model owned by a different user
     different_user_token = _make_jwt(sub="different-user")
     different_user_headers = {"Authorization": f"Bearer {different_user_token}"}
     payload = {"name": f"test-model-admin-{int(time.time())}", "description": "Model for admin delete test"}
@@ -344,17 +321,13 @@ def test_delete_model_admin(created_model_id):
     assert create_response.status_code == 201
     model_id = create_response.json()["id"]
     
-    # Admin should be able to delete it
     admin_token = _make_jwt(sub="admin-user", scopes=("api:read", "api:write", "api:admin"))
     admin_headers = {"Authorization": f"Bearer {admin_token}"}
     
-    # Note: This test requires the API Gateway to forward X-Scope header
-    # For direct service testing, we need to pass it directly
     response = requests.delete(
         f"{GATEWAY_URL}/api/models/{model_id}",
         headers=admin_headers
     )
-    # Should succeed (204) or fail if gateway not forwarding scope (403)
     assert response.status_code in [204, 403], f"Admin delete test: {response.status_code} - {response.text}"
 
 def test_delete_model_non_owner_non_admin(created_model_id):
@@ -380,5 +353,4 @@ def test_delete_model_not_found():
 def test_delete_model_requires_auth():
     """Test that delete requires authentication"""
     response = requests.delete(f"{GATEWAY_URL}/api/models/1")
-    # Gateway returns 401 for missing authentication
     assert response.status_code == 401

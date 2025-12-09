@@ -16,16 +16,14 @@ import hashlib
 from typing import Optional, Dict, Any
 import os
 
-# Configuration
 API_GATEWAY_URL = "http://localhost:8080"
 TIMEOUT = 10
 
-# Colors for output
 GREEN = '\033[0;32m'
 RED = '\033[0;31m'
 YELLOW = '\033[1;33m'
 BLUE = '\033[0;34m'
-NC = '\033[0m'  # No Color
+NC = '\033[0m' 
 
 class TestRunner:
     def __init__(self):
@@ -75,8 +73,6 @@ class TestRunner:
         """Test 1: Verify services are healthy"""
         self.print_header("Test 1: Health Checks")
         
-        # In Kind/Kubernetes, all services accessed through Gateway
-        # In Compose, services are directly accessible
         endpoints = [
             ("API Gateway", f"{API_GATEWAY_URL}/health"),
         ]
@@ -95,8 +91,6 @@ class TestRunner:
                 self.print_fail(f"Error: {str(e)}")
                 all_passed = False
         
-        # Note: In Kind/Kubernetes, backend service health checks require port-forwards
-        # or can be checked via kubectl. For manual testing, Gateway health is sufficient.
         self.print_skip("Backend service health checks (require port-forwards in Kind)")
                 
         return all_passed
@@ -105,14 +99,18 @@ class TestRunner:
         """Test 2: Generate JWT tokens"""
         self.print_header("Test 2: JWT Token Generation")
         
-        # Generate regular user token
+        script_path = "generate_token.py"
+        if not os.path.exists(script_path):
+            script_path = os.path.join("scripts", "generate_token.py")
+        if not os.path.exists(script_path):
+            script_path = os.path.join(os.path.dirname(__file__), "..", "generate_token.py")
+        
         self.print_test("Generate regular user token")
         success, stdout, stderr = self.run_command([
-            sys.executable, "generate_token.py", "--user", "test-user-123"
+            sys.executable, script_path, "--user", "test-user-123"
         ])
         
         if success and stdout:
-            # Extract token from output (token is between dashes after "Token:" line)
             lines = stdout.split('\n')
             token_line = None
             in_token_section = False
@@ -121,7 +119,6 @@ class TestRunner:
                     in_token_section = True
                     continue
                 if in_token_section:
-                    # Skip dash lines, get the actual token line
                     if line.strip() and not line.strip().startswith('-') and len(line.strip()) > 50:
                         token_line = line.strip()
                         break
@@ -136,14 +133,12 @@ class TestRunner:
             self.print_fail(f"Command failed: {stderr}")
             return False
         
-        # Generate admin token
         self.print_test("Generate admin token")
         success, stdout, stderr = self.run_command([
-            sys.executable, "generate_token.py", "--admin", "--user", "admin-user"
+            sys.executable, script_path, "--admin", "--user", "admin-user"
         ])
         
         if success and stdout:
-            # Extract token from output (token is between dashes after "Token:" line)
             lines = stdout.split('\n')
             token_line = None
             in_token_section = False
@@ -152,7 +147,6 @@ class TestRunner:
                     in_token_section = True
                     continue
                 if in_token_section:
-                    # Skip dash lines, get the actual token line
                     if line.strip() and not line.strip().startswith('-') and len(line.strip()) > 50:
                         token_line = line.strip()
                         break
@@ -173,7 +167,6 @@ class TestRunner:
         """Test 3: Public model discovery (no auth required)"""
         self.print_header("Test 3: Public Model Discovery")
         
-        # List all models (public)
         self.print_test("List all models (no auth)")
         try:
             response = requests.get(f"{API_GATEWAY_URL}/api/models", timeout=TIMEOUT)
@@ -187,7 +180,6 @@ class TestRunner:
             self.print_fail(f"Error: {str(e)}")
             return False
         
-        # Get model details (if we have a model)
         if self.created_model_id:
             self.print_test(f"Get model details (ID: {self.created_model_id})")
             try:
@@ -205,7 +197,6 @@ class TestRunner:
         else:
             self.print_skip("No model ID available yet")
         
-        # Test get model details (public)
         if self.created_model_id:
             self.print_test("Get model details (public, no auth)")
             try:
@@ -226,7 +217,7 @@ class TestRunner:
     def test_get_model_versions(self):
         """Test: Get model versions list"""
         if not self.created_model_id:
-            return True  # Skip silently if no model
+            return True  
         
         self.print_test("List model versions")
         try:
@@ -328,7 +319,6 @@ class TestRunner:
             self.print_skip("No model ID available")
             return False
         
-        # Test with auth
         self.print_test("Query latest version (with auth)")
         try:
             response = requests.get(
@@ -340,7 +330,6 @@ class TestRunner:
             if response.status_code == 200:
                 version = response.json()
                 self.print_pass(f"Latest version: {version.get('storage_path', 'N/A')}")
-                return True
             else:
                 self.print_fail(f"Status: {response.status_code}, Response: {response.text}")
                 return False
@@ -348,7 +337,6 @@ class TestRunner:
             self.print_fail(f"Error: {str(e)}")
             return False
         
-        # Test without auth (public)
         self.print_test("Query latest version (no auth - public)")
         try:
             response = requests.get(
@@ -378,15 +366,12 @@ class TestRunner:
             self.print_skip("No model ID available")
             return False
         
-        # Create a small test file with unique content to avoid idempotency hits
         test_file_content = f"This is a test model file for manual testing - {int(time.time())}".encode()
         test_file_size = len(test_file_content)
         
-        # Calculate SHA-256 hash
         file_hash = hashlib.sha256(test_file_content).hexdigest()
         file_hash_with_prefix = f"sha256:{file_hash}"
         
-        # Start upload session
         self.print_test("Start upload session")
         try:
             payload = {
@@ -412,7 +397,6 @@ class TestRunner:
                 upload_id = upload_data.get('upload_id')
                 presigned_urls = upload_data.get('presigned_urls', [])
                 
-                # Check if this is an idempotency hit (already uploaded)
                 if upload_data.get('status') == 'already_completed' or (upload_id and not presigned_urls and upload_data.get('artifact_id')):
                     artifact_id = upload_data.get('artifact_id')
                     if artifact_id:
@@ -426,7 +410,6 @@ class TestRunner:
                 if upload_id and presigned_urls:
                     self.print_pass(f"Upload session created: {upload_id}")
                     
-                    # Extract URL from first presigned URL (could be dict or string)
                     first_url = presigned_urls[0]
                     if isinstance(first_url, dict):
                         upload_url = first_url.get('url')
@@ -439,7 +422,6 @@ class TestRunner:
                         self.print_fail("No URL in presigned_urls")
                         return False
                     
-                    # Upload to first presigned URL
                     self.print_test("Upload file part to presigned URL")
                     try:
                         upload_response = requests.put(
@@ -448,15 +430,12 @@ class TestRunner:
                             timeout=TIMEOUT
                         )
                         if upload_response.status_code in [200, 204]:
-                            # Get ETag from response headers
                             etag = upload_response.headers.get('ETag', '').strip('"')
                             if not etag:
-                                # MinIO might return ETag in different format
                                 etag = upload_response.headers.get('etag', '').strip('"')
                             
                             self.print_pass("File uploaded to MinIO")
                             
-                            # Complete upload
                             self.print_test("Complete upload")
                             try:
                                 complete_payload = {
@@ -517,7 +496,6 @@ class TestRunner:
             self.print_skip("No artifact ID available (upload test may have been skipped)")
             return False
         
-        # Test public download (no auth)
         self.print_test("Public download (no auth)")
         try:
             response = requests.get(
@@ -549,7 +527,6 @@ class TestRunner:
             self.print_skip("No model ID available")
             return False
         
-        # Create a model to delete
         self.print_test("Create model for deletion test")
         try:
             payload = {
@@ -570,7 +547,6 @@ class TestRunner:
                 model = response.json()
                 delete_model_id = model.get('id')
                 
-                # Delete the model
                 self.print_test("Delete model (owner)")
                 delete_response = requests.delete(
                     f"{API_GATEWAY_URL}/api/models/{delete_model_id}",
@@ -603,7 +579,6 @@ class TestRunner:
             self.print_skip("No model ID available")
             return False
         
-        # Create a comment
         self.print_test("Create comment on model")
         try:
             payload = {
@@ -627,7 +602,6 @@ class TestRunner:
                 comment_id = comment.get('id')
                 self.print_pass(f"Comment created: {comment_id}")
                 
-                # Get comments
                 self.print_test("Get comments for model")
                 get_response = requests.get(
                     f"{API_GATEWAY_URL}/api/models/{self.created_model_id}/comments",
@@ -640,7 +614,6 @@ class TestRunner:
                     comments = comments_data.get('data', [])
                     self.print_pass(f"Retrieved {len(comments)} comments")
                     
-                    # Reply to comment
                     if comment_id:
                         self.print_test("Reply to comment")
                         reply_payload = {
@@ -662,7 +635,6 @@ class TestRunner:
                         if reply_response.status_code in [200, 201]:
                             self.print_pass("Reply created")
                             
-                            # Update comment
                             self.print_test("Update comment")
                             update_payload = {
                                 "content": "Updated comment content from test runner"
@@ -680,7 +652,6 @@ class TestRunner:
                             if update_response.status_code in [200, 201]:
                                 self.print_pass("Comment updated")
                                 
-                                # Delete comment
                                 self.print_test("Delete comment")
                                 delete_response = requests.delete(
                                     f"{API_GATEWAY_URL}/api/comments/{comment_id}",
@@ -726,8 +697,6 @@ class TestRunner:
         
         self.print_test("Delete artifact (admin)")
         try:
-            # The service endpoint is /artifacts/{id}
-            # Gateway routes /api/artifacts to upload-download-service (requires gateway restart after config change)
             response = requests.delete(
                 f"{API_GATEWAY_URL}/api/artifacts/{self.created_artifact_id}",
                 headers={"Authorization": f"Bearer {self.admin_token}"},
@@ -759,10 +728,8 @@ class TestRunner:
         self.print_header("Test: Training Service")
         
         if self.is_docker_compose():
-            # Docker Compose environment
             self.print_test("Check Training Service container exists")
             try:
-                # Get all container names and filter for training service
                 success, stdout, stderr = self.run_command([
                     "docker", "compose", "ps", "--format", "{{.Name}}"
                 ])
@@ -775,9 +742,7 @@ class TestRunner:
                         container_name = train_containers[0]
                         self.print_pass(f"Training Service container found: {container_name}")
                         
-                        # Check if it's running
                         self.print_test("Check Training Service logs for queue consumption")
-                        # Use service name instead of container name
                         success2, stdout2, stderr2 = self.run_command([
                             "docker", "compose", "logs", "--tail=10", "model-train-service"
                         ])
@@ -786,7 +751,6 @@ class TestRunner:
                             self.print_pass("Training Service is consuming from queue")
                             return True
                         else:
-                            # Just check if container is running
                             success3, stdout3, stderr3 = self.run_command([
                                 "docker", "compose", "ps", "--format", "{{.Status}}", "--filter", f"name={container_name}"
                             ])
@@ -806,7 +770,6 @@ class TestRunner:
                 self.print_skip(f"Could not check Training Service: {str(e)}")
                 return False
         else:
-            # Kubernetes environment
             self.print_test("Check Training Service pod exists")
             try:
                 success, stdout, stderr = self.run_command([
@@ -816,7 +779,6 @@ class TestRunner:
                 if success and stdout:
                     self.print_pass(f"Training Service pod found: {stdout}")
                     
-                    # Check if it's running
                     self.print_test("Check Training Service logs for queue consumption")
                     success2, stdout2, stderr2 = self.run_command([
                         "kubectl", "logs", "-l", "app=model-train-service", "--tail=10"
@@ -840,10 +802,8 @@ class TestRunner:
         self.print_header("Test 11: RabbitMQ Connectivity")
         
         if self.is_docker_compose():
-            # Docker Compose environment
             self.print_test("Check RabbitMQ container exists")
             try:
-                # Get all container names and filter for rabbitmq
                 success, stdout, stderr = self.run_command([
                     "docker", "compose", "ps", "--format", "{{.Name}}"
                 ])
@@ -856,7 +816,6 @@ class TestRunner:
                         container_name = rabbitmq_containers[0]
                         self.print_pass(f"RabbitMQ container found: {container_name}")
                         
-                        # Check if RabbitMQ is healthy via docker exec (use service name)
                         self.print_test("Check RabbitMQ health")
                         success2, stdout2, stderr2 = self.run_command([
                             "docker", "compose", "exec", "-T", "rabbitmq", "rabbitmq-diagnostics", "ping"
@@ -867,7 +826,6 @@ class TestRunner:
                             self.print_skip("RabbitMQ management UI not exposed (security migration) - use: docker compose exec rabbitmq rabbitmq-diagnostics status")
                             return True
                         else:
-                            # Just verify container is running
                             success3, stdout3, stderr3 = self.run_command([
                                 "docker", "compose", "ps", "--format", "{{.Status}}", "--filter", f"name={container_name}"
                             ])
@@ -888,7 +846,6 @@ class TestRunner:
                 self.print_skip(f"Could not check RabbitMQ: {str(e)}")
                 return False
         else:
-            # Kubernetes environment
             self.print_test("Check RabbitMQ service exists")
             try:
                 success, stdout, stderr = self.run_command([
@@ -909,7 +866,6 @@ class TestRunner:
     def run_all_tests(self):
         """Run all manual tests"""
         print(f"\n{GREEN}{'='*70}{NC}")
-        # Detect environment
         is_compose = self.is_docker_compose()
         env_name = "Docker Compose" if is_compose else "Kind/Kubernetes"
         print(f"{GREEN}  RLLabs Manual Test Runner ({env_name}){NC}")
@@ -918,7 +874,6 @@ class TestRunner:
         print(f"API Gateway URL: {API_GATEWAY_URL}")
         print(f"Testing against {env_name} deployment\n")
         
-        # Check connectivity first
         print("Checking API Gateway connectivity...")
         try:
             response = requests.get(f"{API_GATEWAY_URL}/health", timeout=5)
@@ -933,7 +888,6 @@ class TestRunner:
             print(f"{YELLOW}Make sure port-forward is running: kubectl port-forward svc/api-gateway 8080:8080{NC}\n")
             return False
         
-        # Run tests in order
         tests = [
             ("Health Checks", self.test_health_checks),
             ("JWT Token Generation", self.test_generate_token),
@@ -959,7 +913,6 @@ class TestRunner:
                 print(f"{RED}✗ Test '{test_name}' crashed: {str(e)}{NC}")
                 results[test_name] = False
         
-        # Print summary
         self.print_header("Test Summary")
         
         passed = sum(1 for v in results.values() if v)
@@ -979,4 +932,3 @@ if __name__ == "__main__":
     runner = TestRunner()
     success = runner.run_all_tests()
     sys.exit(0 if success else 1)
-

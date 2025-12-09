@@ -3,34 +3,18 @@ Upload/Download Service - Main Application
 ============================================
 
 This service manages secure file uploads and downloads for model artifacts using MinIO (S3-compatible storage).
-
-Key Architectural Decisions:
-1. Chunked multipart uploads for handling large model files (GBs)
-2. Presigned URLs for direct client-to-storage transfer (bypasses our servers)
-3. Content-addressed storage using SHA-256 for automatic deduplication
-4. Hybrid approach: Synchronous calls to Model Catalog + Async events to RabbitMQ
-5. Idempotency via Redis to prevent duplicate uploads
-
-Trade-offs:
-- Presigned URLs: Better performance but requires time-limited security
-- PostgreSQL for sessions: Strong consistency but more complex than Redis-only
-- Fail-open on events: Upload succeeds even if event publishing fails (availability over consistency)
 """
 
-# =============================================================================
-# OBSERVABILITY SETUP (must be first, before other imports)
-# =============================================================================
+# Observability setup
 import os
 import sys
 
-# Add shared module to path
 shared_path = os.path.join(os.path.dirname(__file__), 'shared')
 if os.path.exists(shared_path) and shared_path not in sys.path:
     sys.path.insert(0, shared_path)
 
 SERVICE_NAME = os.getenv("OTEL_SERVICE_NAME", "upload-download-service")
 
-# Initialize structured logging and tracing
 try:
     from observability import setup_logging, setup_tracing, get_logger
     
@@ -44,21 +28,19 @@ except ImportError:
     logger = logging.getLogger(__name__)
     logger.warning("Observability module not available, using basic logging")
 
-# =============================================================================
-# APPLICATION IMPORTS
-# =============================================================================
+
 from fastapi import FastAPI, Depends, HTTPException, Header, status, Request, BackgroundTasks, Query
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import Response
 from sqlalchemy.orm import Session
 from contextlib import asynccontextmanager
-from typing import Optional, List
+from typing import Optional
 import httpx
 
 from database import get_db, get_read_db, create_db_and_tables
 from models import (
-    UploadInitRequest, UploadInitResponse, PresignedURL,
+    UploadInitRequest, UploadInitResponse,
     UploadCompleteRequest, UploadCompleteResponse,
-    DownloadResponse, UploadPart,
+    DownloadResponse,
     TrainingJobRequest, TrainingJobResponse
 )
 from storage import StorageService
@@ -67,16 +49,14 @@ from event_publisher import get_event_publisher
 from authorization import check_download_permission
 from database import UploadSession
 
-# Configuration from environment
 MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "minio:9000")
-MINIO_PUBLIC_ENDPOINT = os.getenv("MINIO_PUBLIC_ENDPOINT", "localhost:9000")  # For browser-accessible presigned URLs
+MINIO_PUBLIC_ENDPOINT = os.getenv("MINIO_PUBLIC_ENDPOINT", "localhost:9000")  
 MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY", "minioadmin")
 MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY", "minioadmin_password")
 MINIO_BUCKET = os.getenv("MINIO_BUCKET", "models")
 MINIO_USE_SSL = os.getenv("MINIO_USE_SSL", "false").lower() == "true"
 MODEL_CATALOG_URL = os.getenv("MODEL_CATALOG_URL", "http://model-catalog-service:8000")
 
-# Global HTTP client for Model Catalog calls (reused across requests)
 _model_catalog_client: Optional[httpx.AsyncClient] = None
 
 def get_model_catalog_client() -> httpx.AsyncClient:
@@ -96,8 +76,6 @@ def get_model_catalog_client() -> httpx.AsyncClient:
         )
     return _model_catalog_client
 
-# Global StorageService instance (singleton pattern)
-# Created once on startup and reused for all requests
 _storage_service: Optional[StorageService] = None
 
 def get_storage_service() -> StorageService:
@@ -117,7 +95,6 @@ def get_storage_service() -> StorageService:
         )
     return _storage_service
 
-# Application lifespan - handles startup and shutdown
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
@@ -127,10 +104,8 @@ async def lifespan(app: FastAPI):
     """
     logger.info("Upload/Download Service starting...")
     
-    # Create database tables on startup
     create_db_and_tables()
     
-    # Initialize global storage service (creates bucket if needed)
     storage = get_storage_service()
     await storage.initialize()
     
@@ -140,13 +115,12 @@ async def lifespan(app: FastAPI):
     
     logger.info("Upload/Download Service shutting down...")
     
-    # Close HTTP client on shutdown
     global _model_catalog_client
     if _model_catalog_client:
         await _model_catalog_client.aclose()
         _model_catalog_client = None
 
-# FastAPI application
+
 app = FastAPI(
     title="Upload/Download Service",
     description="Manages secure upload and download of model artifacts",
@@ -154,9 +128,6 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# Health check endpoint for Kubernetes readiness/liveness probes
-# Register BEFORE Instrumentator so it can be properly excluded
-# Lightweight version - doesn't check dependencies to avoid expensive operations
 @app.get("/health", tags=["Monitoring"], include_in_schema=False)
 async def health_check():
     """
@@ -164,11 +135,10 @@ async def health_check():
     
     Note: This is intentionally lightweight to avoid expensive operations
     during frequent health checks. For detailed health, use /health/detailed
-    Excluded from schema and Prometheus metrics to minimize overhead.
+    Excluded from schema and Prometheus metrics to minimise overhead.
     """
     return {"status": "ok"}
 
-# Add Prometheus metrics
 try:
     from prometheus_fastapi_instrumentator import Instrumentator
     instrumentator = Instrumentator()
@@ -177,7 +147,6 @@ try:
 except ImportError:
     logger.warning("prometheus-fastapi-instrumentator not available - metrics disabled")
 
-# Detailed health check endpoint (for monitoring, not probes)
 @app.get("/health/detailed", tags=["Monitoring"])
 async def detailed_health_check(db: Session = Depends(get_read_db)):
     """
@@ -193,7 +162,6 @@ async def detailed_health_check(db: Session = Depends(get_read_db)):
         logger.error(f"Database health check failed: {e}")
         db_status = "offline"
     
-    # Check MinIO connectivity
     try:
         storage = get_storage_service()
         await storage.initialize()
@@ -230,10 +198,6 @@ async def initiate_upload(
     4. Generate presigned URLs for each chunk
     5. Return upload_id and presigned URLs to client
     
-    Architectural Decision: Use presigned URLs to allow direct client-to-MinIO uploads
-    - Trade-off: Better performance (no data through our servers) but URLs are time-limited
-    - Security: URLs expire after 1 hour, preventing unauthorized access
-    
     Args:
         request: Upload configuration (filename, size, hash, chunks)
         user_id: User ID from API Gateway JWT (injected via header)
@@ -243,13 +207,10 @@ async def initiate_upload(
     """
     logger.info(f"User {user_id} initiating upload for {request.filename} ({request.file_size} bytes)")
     
-    # Get shared storage service instance (reused across requests)
     storage = get_storage_service()
     session_manager = SessionManager(db, storage)
     
     try:
-        # Check for duplicate upload using idempotency (Redis-based)
-        # If this exact file was recently uploaded, return existing session
         existing_session = await session_manager.check_idempotency(
             file_hash=request.file_hash,
             user_id=user_id
@@ -259,8 +220,6 @@ async def initiate_upload(
             logger.info(f"Returning existing upload session {existing_session['upload_id']} (idempotent)")
             return UploadInitResponse(**existing_session)
         
-        # Create new upload session
-        # If internal=true, use internal endpoint (for service-to-service access in Kubernetes/Docker)
         use_internal_endpoint = internal
         upload_session = await session_manager.create_upload_session(
             filename=request.filename,
@@ -294,7 +253,6 @@ async def initiate_upload(
                 "error_type": type(e).__name__
             }
         )
-        # Provide more specific error messages
         error_detail = str(e)
         if "connection" in error_detail.lower() or "timeout" in error_detail.lower():
             raise HTTPException(
@@ -327,11 +285,6 @@ async def complete_upload(
     6. Publish ArtifactUploaded event to RabbitMQ (asynchronous, best-effort)
     7. Mark session as complete
     
-    Architectural Decision: Hybrid approach
-    - Synchronous: Call Model Catalog directly (required for consistency)
-    - Asynchronous: Publish events for other services (optional, fail-open)
-    - Trade-off: Model Catalog must be available, but event broker can be down
-    
     Args:
         upload_id: Session ID from initiate_upload
         request: List of uploaded parts with ETags
@@ -342,12 +295,10 @@ async def complete_upload(
     """
     logger.info(f"User {user_id} completing upload {upload_id}")
     
-    # Get shared storage service instance
     storage = get_storage_service()
     session_manager = SessionManager(db, storage)
     
     try:
-        # Complete the upload and verify integrity
         result = await session_manager.complete_upload(
             upload_id=upload_id,
             parts=request.parts,
@@ -356,28 +307,20 @@ async def complete_upload(
         
         logger.info(f"Upload {upload_id} completed successfully, artifact_id: {result['artifact_id']}")
         
-        # Get artifact_type from session to determine if we should register as model version
-        # Only register "model" artifacts as versions - config and dataset are supporting files
         session = db.query(UploadSession).filter(UploadSession.upload_id == upload_id).first()
-        artifact_type = session.artifact_type if session else "model"  # Default to model for backward compatibility
+        artifact_type = session.artifact_type if session else "model" 
         
-        # SYNCHRONOUS: Register version with Model Catalog Service
-        # Only register model artifacts as versions (not config or dataset)
-        # Config and dataset artifacts are stored but not registered as model versions
         if artifact_type == "model" and result.get('model_id'):
             try:
-                # Model Catalog will calculate the correct version number automatically
                 catalog_result = await register_with_model_catalog(
                     model_id=result['model_id'],
                     storage_path=result['storage_path'],
                     content_hash=result['artifact_id'],
                     user_id=user_id
                 )
-                # Update result with the version and storage_path assigned by Model Catalog
                 result['version'] = catalog_result['version']
                 result['storage_path'] = catalog_result['storage_path']
                 
-                # Update the session's storage_path in the database with the correct version
                 session.storage_path = catalog_result['storage_path']
                 db.commit()
                 
@@ -385,29 +328,23 @@ async def complete_upload(
                 result['registered_with_catalog'] = True
             except Exception as e:
                 error_str = str(e)
-                # 409 Conflict means version already exists - this is fine, upload was successful
                 if "409" in error_str or "Conflict" in error_str:
                     logger.warning(f"Model Catalog returned 409 (version already exists) - upload successful: {e}")
                     result['registered_with_catalog'] = False
                     result['catalog_message'] = "Version already exists in catalog"
-                    # Don't mark as failed - the upload was successful
                 else:
                     logger.error(f"Failed to register with Model Catalog: {e}")
-                    # Mark upload as failed since catalog registration is required (except for 409)
                     await session_manager.fail_upload(upload_id, f"Model Catalog registration failed: {str(e)}")
                     raise HTTPException(
                         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                         detail=f"Upload completed but failed to register with Model Catalog: {str(e)}"
                     )
         else:
-            # Config or dataset artifacts - don't register as model versions
             logger.info(f"Skipping Model Catalog registration for {artifact_type} artifact (only model artifacts are registered as versions)")
             result['registered_with_catalog'] = False
             result['catalog_message'] = f"{artifact_type} artifacts are not registered as model versions"
-            result['version'] = None  # Explicitly set to None for non-model artifacts
+            result['version'] = None  
         
-        # ASYNCHRONOUS: Publish ArtifactUploaded event in background (best-effort, fail-open)
-        # This is optional - if it fails, we log but don't fail the upload
         def publish_event():
             try:
                 publisher = get_event_publisher()
@@ -415,7 +352,7 @@ async def complete_upload(
                     publisher.publish_artifact_uploaded(
                         artifact_id=result['artifact_id'],
                         model_id=result['model_id'],
-                        version=result.get('version'),  # May be None for non-model artifacts
+                        version=result.get('version'),  
                         storage_path=result['storage_path'],
                         uploaded_by=user_id,
                         file_size=result['file_size'],
@@ -460,18 +397,13 @@ async def abort_upload(
     user_id: str = Header(..., alias="X-User-Id")
 ):
     """
-    Abort an in-progress upload (optimized for performance)
+    Abort an in-progress upload (optimised for performance)
     
     Flow:
     1. Mark session as aborted in database (fast, <200ms)
     2. Return success immediately
     3. Clean up partial data in MinIO in background (non-blocking)
-    
-    Performance Optimization:
-    - MinIO cleanup happens asynchronously to avoid blocking (was 7-13s, now <200ms)
-    - Request returns immediately after marking session as aborted
-    - Background cleanup has 5s timeout to fail fast if MinIO is slow
-    
+
     Use cases:
     - User cancels upload
     - Upload fails and needs cleanup
@@ -490,10 +422,8 @@ async def abort_upload(
     session_manager = SessionManager(db, storage)
     
     try:
-        # Fast path: mark as aborted and return immediately
         temp_object_key, minio_upload_id = await session_manager.abort_upload(upload_id, user_id)
         
-        # Schedule MinIO cleanup in background (non-blocking)
         background_tasks.add_task(
             session_manager.cleanup_minio_upload,
             temp_object_key,
@@ -505,7 +435,7 @@ async def abort_upload(
         return {
             "status": "aborted",
             "upload_id": upload_id,
-            "cleanup_scheduled": True  # Changed from cleanup_completed to indicate async cleanup
+            "cleanup_scheduled": True  
         }
         
     except Exception as e:
@@ -534,28 +464,21 @@ async def check_download_url(
     storage = get_storage_service()
     
     try:
-        # For training jobs, check storage first (artifacts may exist even if not in our DB)
-        # Then check permissions
         object_key = artifact_id
         file_info = await storage.get_object_info(object_key)
         
         if not file_info:
-            # Artifact doesn't exist in storage - return 404
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Artifact {artifact_id} not found")
         
-        # Artifact exists in storage - now check permissions
-        # If model_id is provided (training job context), allow access if user has access to that model
         has_permission, error_code = await check_download_permission(db, user_id, artifact_id, training_model_id=model_id)
         if not has_permission:
             if error_code == "404":
-                # This shouldn't happen if file_info exists, but handle it anyway
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Artifact {artifact_id} not found")
             elif error_code == "403":
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Permission denied")
             else:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid request")
         
-        # Return 200 with no body (HEAD request)
         return Response(status_code=200)
         
     except HTTPException:
@@ -589,12 +512,6 @@ async def get_download_url(
     - Authenticated users: Must be owner or have model-level access
     - RBAC enforced via check_download_permission() before generating presigned URL
     
-    Architecture Decision: Presigned URLs for direct downloads
-    - Trade-off: High performance (direct MinIO access) but time-limited URLs
-    - Security: URLs expire (default 1 hour), preventing URL sharing
-    - No bandwidth through our service = better scalability
-    - RBAC enforced in application layer before MinIO access
-    
     Args:
         artifact_id: Content hash (sha256:...) of the artifact
         expires_in: URL expiration time in seconds (default: 3600 = 1 hour)
@@ -603,7 +520,6 @@ async def get_download_url(
     Returns:
         Presigned download URL and file metadata
     """
-    # Log download request (authenticated or public)
     if user_id:
         logger.info(f"User {user_id} requesting download for {artifact_id}")
     else:
@@ -612,31 +528,24 @@ async def get_download_url(
     storage = get_storage_service()
     
     try:
-        # STEP 1: AUTHORIZATION CHECK (before generating presigned URL)
-        # This is critical for security - we check permissions in our service
-        # before allowing access to MinIO. MinIO doesn't know about users/models.
         has_permission, error_code = await check_download_permission(db, user_id, artifact_id)
         if not has_permission:
             if error_code == "404":
-                # Artifact not found in our system
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail=f"Artifact {artifact_id} not found"
                 )
             elif error_code == "400":
-                # Invalid artifact_id format
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=f"Invalid artifact_id format: {artifact_id}"
                 )
             elif error_code == "500":
-                # Internal error
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail="Internal error checking permissions"
                 )
             else:
-                # Default to 403 Forbidden
                 user_context = f"User {user_id}" if user_id else "Anonymous user"
                 logger.warning(f"{user_context} denied access to artifact {artifact_id}")
                 raise HTTPException(
@@ -644,8 +553,7 @@ async def get_download_url(
                     detail="You do not have permission to download this artifact"
                 )
         
-        # STEP 2: Verify artifact exists in storage
-        object_key = artifact_id  # artifact_id is the content-addressed key
+        object_key = artifact_id  
         file_info = await storage.get_object_info(object_key)
         
         if not file_info:
@@ -654,9 +562,6 @@ async def get_download_url(
                 detail=f"Artifact {artifact_id} not found"
             )
         
-        # Generate presigned download URL
-        # If internal=true, use internal endpoint (for service-to-service access in Kubernetes)
-        # Otherwise, use public endpoint (for browser/client access)
         use_internal_endpoint = internal
         download_url = await storage.generate_presigned_get_url(
             object_key=object_key,
@@ -669,7 +574,6 @@ async def get_download_url(
         
         logger.info(f"Generated download URL for {artifact_id}, expires at {expires_at}")
         
-        # Optional: Publish ArtifactDownloaded event in background for audit trail
         if background_tasks:
             def publish_event():
                 try:
@@ -712,12 +616,9 @@ async def delete_artifact(
     Delete an artifact. Only the owner or an admin can delete.
     
     This will:
-    1. Check authorization (owner or admin)
+    1. Check authorisation (owner or admin)
     2. Delete the artifact file from MinIO storage
     3. Optionally mark upload sessions as deleted (soft delete)
-    
-    Note: This is a hard delete - the artifact will be permanently removed.
-    Consider implementing soft delete if you need recovery capabilities.
     
     Args:
         artifact_id: Content hash (sha256:...) of the artifact
@@ -729,7 +630,6 @@ async def delete_artifact(
     """
     logger.info(f"User {user_id} requesting delete for artifact {artifact_id}")
     
-    # Validate artifact_id format
     if not artifact_id.startswith("sha256:") or len(artifact_id) != 71:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -738,7 +638,6 @@ async def delete_artifact(
     
     try:
         storage = get_storage_service()
-        # STEP 1: Find upload session to check ownership
         from sqlalchemy import case
         from database import UploadStatus
         
@@ -758,16 +657,13 @@ async def delete_artifact(
                 detail=f"Artifact {artifact_id} not found"
             )
         
-        # STEP 2: Check authorization (owner OR admin)
         is_owner = session.user_id == user_id
         
-        # Check admin scope (prefer X-Is-Admin header from API Gateway)
         is_admin_user = False
         is_admin_header = request.headers.get("X-Is-Admin", "").lower() == "true"
         if is_admin_header:
             is_admin_user = True
         elif user_scopes:
-            # Fallback to parsing scopes (for direct service access)
             scopes = user_scopes.split() if isinstance(user_scopes, str) else []
             is_admin_user = "api:admin" in scopes
         
@@ -781,26 +677,18 @@ async def delete_artifact(
                 detail="Only the artifact owner or an admin can delete this artifact"
             )
         
-        # STEP 3: Delete from MinIO storage
         object_key = artifact_id
         try:
             await storage.delete_object(object_key)
             logger.info(f"Deleted artifact {artifact_id} from MinIO storage")
         except Exception as e:
             logger.warning(f"Failed to delete artifact {artifact_id} from storage: {e}")
-            # Continue even if storage delete fails (best effort)
-        
-        # STEP 4: Optionally mark sessions as deleted (soft delete)
-        # For now, we'll leave sessions in the database for audit trail
-        # You can add a 'deleted_at' field if you want soft delete
         
         logger.info(
             f"Artifact {artifact_id} deleted by "
             f"{'admin' if is_admin_user else 'owner'} {user_id}"
         )
         
-        # Optional: Publish ArtifactDeleted event in background
-        # Note: Event publisher doesn't have this method yet, but structure is ready
         def publish_event():
             try:
                 publisher = get_event_publisher()
@@ -812,7 +700,7 @@ async def delete_artifact(
                 logger.warning(f"Failed to publish ArtifactDeleted event: {e}")
         background_tasks.add_task(publish_event)
         
-        return None  # 204 No Content
+        return None
         
     except HTTPException:
         raise
@@ -832,13 +720,6 @@ async def register_with_model_catalog(
     """
     Register a new model version with the Model Catalog Service
     
-    This is a SYNCHRONOUS operation - if it fails, the upload is considered failed.
-    
-    Architectural Decision: Direct HTTP call to Model Catalog
-    - Trade-off: Tight coupling but strong consistency
-    - Model Catalog is the source of truth for model metadata and version numbers
-    - If Model Catalog is down, uploads will fail (prioritize consistency over availability)
-    
     Uses global HTTP client with connection pooling for better performance.
     
     Args:
@@ -855,8 +736,6 @@ async def register_with_model_catalog(
     """
     client = get_model_catalog_client()
     try:
-        # Don't send version - let Model Catalog calculate it automatically
-        # This ensures sequential version numbering even if some uploads fail
         response = await client.post(
             f"{MODEL_CATALOG_URL}/models/{model_id}/versions",
             json={
@@ -905,7 +784,6 @@ async def list_training_jobs(
     from typing import List, Dict, Any
     
     try:
-        # Connect to Redis (same config as model-train-service)
         REDIS_HOST = os.getenv("REDIS_HOST", "redis_cache")
         REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
         REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
@@ -919,7 +797,6 @@ async def list_training_jobs(
             socket_connect_timeout=1.0
         )
         
-        # Scan for all job keys (pattern: job:*)
         jobs: List[Dict[str, Any]] = []
         cursor = 0
         pattern = "job:*"
@@ -931,10 +808,8 @@ async def list_training_jobs(
                     job_data = redis_client.get(key)
                     if job_data:
                         job = json.loads(job_data)
-                        # Filter by user_id if provided
                         if user_id and job.get("user_id") != user_id:
                             continue
-                        # Filter by model_id if provided
                         if model_id is not None and job.get("model_id") != model_id:
                             continue
                         jobs.append(job)
@@ -945,7 +820,6 @@ async def list_training_jobs(
             if cursor == 0:
                 break
         
-        # Sort by created_at (newest first)
         jobs.sort(key=lambda x: x.get("created_at", ""), reverse=True)
         
         return jobs
@@ -955,7 +829,6 @@ async def list_training_jobs(
         return []
     except Exception as e:
         logger.error(f"Error listing training jobs: {e}", exc_info=True)
-        # Return empty list on error (fail-open)
         return []
 
 
@@ -993,15 +866,12 @@ async def trigger_training_job(
     logger.info(f"User {user_id} triggering training job {job_id}")
     
     try:
-        # Fast validation: only check artifact_id format, not existence
-        # Existence validation moved to async training worker for better performance
         artifact_ids = [
             request.config_artifact_id,
             request.dataset_artifact_id,
             request.model_artifact_id
         ]
         
-        # Validate artifact_id format only (fast, no I/O)
         for artifact_id in artifact_ids:
             if not artifact_id.startswith("sha256:") or len(artifact_id) != 71:
                 raise HTTPException(
@@ -1009,19 +879,15 @@ async def trigger_training_job(
                     detail=f"Invalid artifact_id format: {artifact_id}"
                 )
         
-        # Get model_id for uploading trained weights
-        # Priority: 1) Explicit model_id in request, 2) Lookup from artifact upload history
         model_id = request.model_id
         
         if model_id is None:
-            # Query the upload session to find which model this artifact belongs to
-            # Filter by user_id to ensure we get the correct model for this user
             from sqlalchemy import case
             from database import UploadStatus
             
             model_session = db.query(UploadSession).filter(
                 UploadSession.file_hash == request.model_artifact_id,
-                UploadSession.user_id == user_id  # Filter by user to get the correct model
+                UploadSession.user_id == user_id  
             ).order_by(
                 case(
                     (UploadSession.status == UploadStatus.COMPLETED, 0),
@@ -1038,14 +904,13 @@ async def trigger_training_job(
         else:
             logger.info(f"Using explicit model_id {model_id} from request")
         
-        # Publish to RabbitMQ in background (fail-open: don't fail request if RabbitMQ unavailable)
         message = {
             "job_id": job_id,
             "config_artifact_id": request.config_artifact_id,
             "dataset_artifact_id": request.dataset_artifact_id,
             "model_artifact_id": request.model_artifact_id,
             "user_id": user_id,
-            "model_id": model_id  # Include model_id for uploading trained weights
+            "model_id": model_id 
         }
         
         def publish_job():
@@ -1061,7 +926,6 @@ async def trigger_training_job(
         
         background_tasks.add_task(publish_job)
         
-        # Create job status in Redis immediately so it appears in the list
         try:
             import redis
             import json
@@ -1092,7 +956,6 @@ async def trigger_training_job(
                 "error": None
             }
             
-            # Store with 24 hour TTL (same as training service)
             redis_client.setex(
                 f"job:{job_id}",
                 86400,  # 24 hours
@@ -1100,10 +963,8 @@ async def trigger_training_job(
             )
             logger.info(f"Created job status entry in Redis for {job_id}")
         except Exception as e:
-            # Fail-open: don't fail the request if Redis is unavailable
             logger.warning(f"Failed to create job status in Redis: {e}")
         
-        # Return immediately - job publishing happens in background
         return TrainingJobResponse(
             job_id=job_id,
             status="queued",

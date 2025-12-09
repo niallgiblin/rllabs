@@ -2,7 +2,7 @@
 Helper functions for RabbitMQ connectivity in tests
 Handles both docker-compose (services not exposed) and kubernetes (port-forward) scenarios
 
-Since RabbitMQ is no longer exposed in docker-compose, tests need to either:
+RabbitMQ tests need to either:
 1. Use a temporary port-forward (handled by pytest fixture)
 2. Skip with helpful message
 """
@@ -10,7 +10,6 @@ Since RabbitMQ is no longer exposed in docker-compose, tests need to either:
 import os
 import subprocess
 import pika
-import time
 from typing import Optional, Tuple
 
 
@@ -51,7 +50,6 @@ def setup_rabbitmq_port_forward() -> Optional[int]:
         return None
     
     try:
-        # Check if port-forward already exists
         result = subprocess.run(
             ["docker", "compose", "port", "rabbitmq", "5672"],
             capture_output=True,
@@ -59,7 +57,6 @@ def setup_rabbitmq_port_forward() -> Optional[int]:
             timeout=2
         )
         if result.returncode == 0 and result.stdout.strip():
-            # Port-forward exists
             host_port = int(result.stdout.strip().split(':')[-1])
             return host_port
     except Exception:
@@ -121,7 +118,6 @@ def get_rabbitmq_connection_or_skip(host: Optional[str] = None, port: Optional[i
     """
     import pytest
     
-    # Check environment variables first (for port-forward setup)
     env_host = os.getenv("RABBITMQ_HOST", host)
     env_port = os.getenv("RABBITMQ_PORT")
     if env_port:
@@ -133,16 +129,12 @@ def get_rabbitmq_connection_or_skip(host: Optional[str] = None, port: Optional[i
         except (ValueError, TypeError):
             pass
     
-    # Try direct connection with provided or default values
     connection = create_rabbitmq_connection(host, port)
     if connection:
         return connection
     
-    # If in docker-compose and connection failed, check if RabbitMQ is running
     if is_docker_compose():
         if check_rabbitmq_via_docker_exec():
-            # RabbitMQ is running but not exposed
-            # Try to get port-forward info
             try:
                 port_info = subprocess.run(
                     ["docker", "compose", "port", "rabbitmq", "5672"],
@@ -159,7 +151,7 @@ def get_rabbitmq_connection_or_skip(host: Optional[str] = None, port: Optional[i
                 pass
             
             pytest.skip(
-                "RabbitMQ is running but not exposed (security migration). "
+                "RabbitMQ is running but not exposed for security. "
                 "To run RabbitMQ tests:\n"
                 "  1. Run: ./tests/setup_rabbitmq_portforward.sh\n"
                 "  2. Or manually: export RABBITMQ_PORT=<forwarded_port>\n"
@@ -168,9 +160,7 @@ def get_rabbitmq_connection_or_skip(host: Optional[str] = None, port: Optional[i
         else:
             pytest.skip("RabbitMQ is not running or not accessible via docker compose exec")
     else:
-        # Kubernetes or other environment
         pytest.skip(
             "RabbitMQ not available. "
             "For kubernetes, set up port-forward: kubectl port-forward svc/rabbitmq 5672:5672"
         )
-

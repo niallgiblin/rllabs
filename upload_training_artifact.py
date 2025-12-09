@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Upload training artifacts through the API Gateway with JWT authentication.
 
@@ -39,12 +38,10 @@ def get_jwt_token(gateway_url: str = "http://localhost:8080", username: str = "t
     2. Login via /api/auth/login (if password provided)
     3. Generate token using generate_token.py script
     """
-    # Try environment variable first
     token = os.getenv("JWT_TOKEN")
     if token:
         return token
     
-    # Try login if password provided
     if password:
         try:
             response = requests.post(
@@ -56,9 +53,8 @@ def get_jwt_token(gateway_url: str = "http://localhost:8080", username: str = "t
                 data = response.json()
                 return data.get("token")
         except Exception:
-            pass  # Fall through to token generation
+            pass  
     
-    # Fallback: Generate token using generate_token.py
     try:
         script_path = Path(__file__).parent / "generate_token.py"
         if script_path.exists():
@@ -69,20 +65,17 @@ def get_jwt_token(gateway_url: str = "http://localhost:8080", username: str = "t
                 timeout=5
             )
             if result.returncode == 0:
-                # Extract token from output (it's printed on a line by itself)
                 for line in result.stdout.split("\n"):
                     if line and not line.startswith("=") and not line.startswith("-") and "Token:" not in line:
-                        # Token is usually a long base64-like string
                         if len(line.strip()) > 50 and "." in line:
                             return line.strip()
-        # If script doesn't exist or failed, try importing directly
         sys.path.insert(0, str(Path(__file__).parent))
         from generate_token import generate_token
         return generate_token(user_id=username)
     except Exception as e:
-        print(f"⚠️  Warning: Could not generate token automatically: {e}")
-        print("   Please set JWT_TOKEN environment variable or use --password")
-        print("   Example: export JWT_TOKEN=$(python generate_token.py)")
+        print(f"Warning: Could not generate token automatically: {e}")
+        print("Please set JWT_TOKEN environment variable or use --password")
+        print("Example: export JWT_TOKEN=$(python generate_token.py)")
         return None
 
 
@@ -106,27 +99,24 @@ def upload_artifact(
         minio_endpoint: MinIO endpoint for presigned URLs (auto-detected if not provided)
     """
     if not filepath.exists():
-        print(f"❌ File not found: {filepath}")
+        print(f"File not found: {filepath}")
         return None
     
-    # Get JWT token if not provided
     if not jwt_token:
         jwt_token = get_jwt_token(gateway_url)
         if not jwt_token:
-            print("❌ Failed to get JWT token. Please set JWT_TOKEN environment variable.")
-            print("   Run: export JWT_TOKEN=$(python generate_token.py)")
+            print("Failed to get JWT token. Please set JWT_TOKEN environment variable.")
+            print("Run: export JWT_TOKEN=$(python generate_token.py)")
             return None
     
     file_size = filepath.stat().st_size
-    print(f"📤 Uploading {filepath.name} ({file_size:,} bytes) as {artifact_type}...")
-    print(f"   Using API Gateway: {gateway_url}")
+    print(f"Uploading {filepath.name} ({file_size:,} bytes) as {artifact_type}...")
+    print(f"Using API Gateway: {gateway_url}")
     
-    # Step 1: Calculate hash
     file_hash = calculate_sha256(filepath)
-    print(f"   Hash: {file_hash}")
+    print(f"Hash: {file_hash}")
     
-    # Step 2: Initiate upload through API Gateway
-    print("   Initiating upload session via API Gateway...")
+    print("Initiating upload session via API Gateway...")
     init_response = requests.post(
         f"{gateway_url}/api/uploads",
         json={
@@ -145,13 +135,13 @@ def upload_artifact(
     )
     
     if init_response.status_code == 401:
-        print(f"❌ Authentication failed. Please check your JWT token.")
-        print(f"   Generate a new token: python generate_token.py")
+        print(f"Authentication failed. Please check your JWT token.")
+        print(f"Generate a new token: python generate_token.py")
         return None
     
     if init_response.status_code != 201:
-        print(f"❌ Failed to initiate upload: {init_response.status_code}")
-        print(f"   Response: {init_response.text}")
+        print(f"Failed to initiate upload: {init_response.status_code}")
+        print(f"Response: {init_response.text}")
         return None
     
     upload_data = init_response.json()
@@ -161,7 +151,6 @@ def upload_artifact(
     print(f"   Upload session: {upload_id}")
     print(f"   Uploading {len(presigned_urls)} chunk(s)...")
     
-    # Step 3: Upload chunks directly to MinIO (bypass gateway for performance)
     parts = []
     chunk_size = 5242880  # 5MB
     
@@ -170,46 +159,37 @@ def upload_artifact(
     # In Kubernetes: presigned URLs have minio:9000 (internal) and need replacement
     if presigned_urls:
         first_url = presigned_urls[0]["url"]
-        # Replace internal MinIO endpoint with accessible endpoint
         if minio_endpoint:
-            # User provided explicit endpoint
             minio_endpoint_clean = minio_endpoint.replace("http://", "").replace("https://", "")
-            print(f"   Using provided MinIO endpoint: {minio_endpoint_clean}")
+            print(f"Using provided MinIO endpoint: {minio_endpoint_clean}")
         elif "minio:9000" in first_url:
-            # Kubernetes: URL contains internal endpoint, needs replacement
-            # Try ingress first (minio.localhost), fallback to port-forward (localhost:9000)
             try:
                 test_response = requests.get("http://minio.localhost/minio/health/live", timeout=2)
                 if test_response.status_code == 200:
                     minio_endpoint_clean = "minio.localhost:9000"
-                    print(f"   Detected MinIO ingress: {minio_endpoint_clean}")
+                    print(f"Detected MinIO ingress: {minio_endpoint_clean}")
                 else:
                     minio_endpoint_clean = "localhost:9000"
-                    print(f"   Using MinIO port-forward: {minio_endpoint_clean}")
+                    print(f"Using MinIO port-forward: {minio_endpoint_clean}")
             except:
                 minio_endpoint_clean = "localhost:9000"
-                print(f"   Using MinIO port-forward (ingress not available): {minio_endpoint_clean}")
+                print(f"Using MinIO port-forward (ingress not available): {minio_endpoint_clean}")
         else:
-            # Docker Compose or already correct: URL already has accessible endpoint (localhost:9000)
             minio_endpoint_clean = None
-            print(f"   MinIO endpoint already accessible (Docker Compose or configured endpoint)")
+            print(f"MinIO endpoint already accessible (Docker Compose or configured endpoint)")
     
     with open(filepath, "rb") as f:
         for url_data in presigned_urls:
             part_number = url_data["part_number"]
             url = url_data["url"]
             
-            # Replace MinIO endpoint if needed (Kubernetes case)
             if minio_endpoint_clean:
-                # Replace internal endpoint (minio:9000) with accessible one
-                # Handle both http://minio:9000 and minio:9000 patterns
                 if "http://minio:9000" in url:
                     url = url.replace("http://minio:9000", f"http://{minio_endpoint_clean}")
                 elif "https://minio:9000" in url:
                     url = url.replace("https://minio:9000", f"https://{minio_endpoint_clean}")
                 else:
                     url = url.replace("minio:9000", minio_endpoint_clean)
-            # If minio_endpoint_clean is None, URL is already correct (Docker Compose case)
             
             chunk = f.read(chunk_size)
             if not chunk:
@@ -217,16 +197,15 @@ def upload_artifact(
             
             chunk_response = requests.put(url, data=chunk, timeout=60)
             if chunk_response.status_code not in [200, 201]:
-                print(f"❌ Failed to upload chunk {part_number}: {chunk_response.status_code}")
-                print(f"   URL: {url[:100]}...")
+                print(f"Failed to upload chunk {part_number}: {chunk_response.status_code}")
+                print(f"URL: {url[:100]}...")
                 return None
             
             etag = chunk_response.headers.get("ETag", "").strip('"')
             parts.append({"part_number": part_number, "etag": etag})
-            print(f"   ✓ Chunk {part_number} uploaded")
+            print(f"Chunk {part_number} uploaded")
     
-    # Step 4: Complete upload through API Gateway
-    print("   Completing upload via API Gateway...")
+    print("Completing upload via API Gateway...")
     complete_response = requests.post(
         f"{gateway_url}/api/uploads/{upload_id}/complete",
         json={"parts": parts},
@@ -238,17 +217,17 @@ def upload_artifact(
     )
     
     if complete_response.status_code != 200:
-        print(f"❌ Failed to complete upload: {complete_response.status_code}")
-        print(f"   Response: {complete_response.text}")
+        print(f"Failed to complete upload: {complete_response.status_code}")
+        print(f"Response: {complete_response.text}")
         return None
     
     result = complete_response.json()
     artifact_id = result['artifact_id']
     
-    print(f"\n✅ Upload complete!")
-    print(f"   Artifact ID: {artifact_id}")
-    print(f"\n📋 Copy this artifact ID into the training job form:")
-    print(f"   {artifact_id}\n")
+    print(f"\nUpload complete!")
+    print(f"Artifact ID: {artifact_id}")
+    print(f"\nCopy this artifact ID into the training job form:")
+    print(f"{artifact_id}\n")
     
     return artifact_id
 
@@ -341,7 +320,6 @@ Note: You need to create a model first! You can do this via:
     
     args = parser.parse_args()
     
-    # Use provided token or get from env
     jwt_token = args.jwt_token or os.getenv("JWT_TOKEN")
     
     try:
@@ -358,10 +336,10 @@ Note: You need to create a model first! You can do this via:
         else:
             sys.exit(1)
     except KeyboardInterrupt:
-        print("\n\n⚠️  Upload cancelled")
+        print("\n\nUpload cancelled")
         sys.exit(1)
     except Exception as e:
-        print(f"\n❌ Error: {e}")
+        print(f"\nError: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)

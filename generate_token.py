@@ -17,8 +17,7 @@ import argparse
 from datetime import datetime, timedelta, timezone
 import sys
 
-# Must match api_gateway/jwt_auth.py
-SECRET_KEY = "your-secret-key"
+SECRET_KEY = "your-secret-key" #hardcoded for local ease and matches Gateway
 ALGORITHM = "HS256"
 DEFAULT_EXPIRY_MINUTES = 30
 
@@ -52,7 +51,7 @@ def generate_token(user_id: str = "test-user", scopes: list = None, expires_minu
 
 def decode_token(token: str) -> dict:
     """
-    Decode and verify a JWT token (for debugging)
+    Decode and verify a JWT token for debugging
     
     Args:
         token: JWT token string
@@ -125,7 +124,6 @@ Examples:
     
     args = parser.parse_args()
     
-    # Decode mode
     if args.decode:
         payload = decode_token(args.decode)
         print("Token Payload:")
@@ -134,7 +132,6 @@ Examples:
             print(f"{key}: {value}")
         return
     
-    # Generate token
     scopes = args.scopes if args.scopes else ["api:read", "api:write"]
     
     if args.admin and "api:admin" not in scopes:
@@ -146,7 +143,6 @@ Examples:
         expires_minutes=args.expires
     )
     
-    # Display token info
     print("=" * 70)
     print("JWT Token Generated")
     print("=" * 70)
@@ -163,7 +159,6 @@ Examples:
     print(f'  curl -H "Authorization: Bearer {token[:50]}..." http://localhost:8080/api/models')
     print()
     
-    # Verify token
     payload = decode_token(token)
     if "error" not in payload:
         print("Token Verification:")

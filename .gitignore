@@ -1,20 +1,15 @@
-# Byte-compiled / optimized / DLL files
 __pycache__/
 *.pyc
 
-# Cache
 .pytest_cache/
 
-# Logs
 *.log
 
-# VSCode workspace
 .vscode/
 rllabs.code-workspace
 
 .DS_STORE
 
-# Frontend build artifacts
 node_modules/
 dist/
 build/
@@ -23,11 +18,6 @@ build/
 .env.local
 .env.*.local
 
-# Frontend package manager (lock files should usually be committed)
-# yarn.lock
-# pnpm-lock.yaml
-
-# Auth user data (dev only)
 api_gateway/users.json
 
 .python-version

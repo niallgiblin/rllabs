@@ -119,25 +119,41 @@ class EventPublisher:
         try:
             self._ensure_connection()
             
-            if self._channel is None:
+            if self._channel is None or self._connection is None:
                 logger.warning("RabbitMQ not available, event not published")
                 return
             
-            # Publish to exchange
+            try:
+                if self._channel.is_closed:
+                    logger.debug("Channel is closed, reconnecting...")
+                    self._ensure_connection()
+                    if self._channel is None:
+                        logger.warning("RabbitMQ not available after reconnect, event not published")
+                        return
+            except (AttributeError, IndexError):
+                logger.debug("Channel state check failed, reconnecting...")
+                self._ensure_connection()
+                if self._channel is None:
+                    logger.warning("RabbitMQ not available after reconnect, event not published")
+                    return
+            
             self._channel.basic_publish(
                 exchange='model_events',
                 routing_key=routing_key,
                 body=json.dumps(event),
                 properties=pika.BasicProperties(
-                    delivery_mode=2,  # Make message persistent
+                    delivery_mode=2,  
                     content_type='application/json'
                 )
             )
             logger.info(f"Published event: {routing_key} - {event['event_type']}")
             
+        except (pika.exceptions.ChannelClosed, pika.exceptions.ConnectionClosed) as e:
+            logger.debug(f"RabbitMQ channel/connection closed, event not published: {e}")
+            self._connection = None
+            self._channel = None
         except Exception as e:
             logger.error(f"Failed to publish event: {e}")
-            # Fail gracefully - don't block the main operation if messaging fails
     
     def close(self):
         """Close RabbitMQ connection"""

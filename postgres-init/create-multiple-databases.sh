@@ -9,7 +9,6 @@ function create_database() {
 	local database=$1
 	echo "Checking if database '$database' exists..."
 	
-	# Check if database exists (connect to postgres database which always exists)
 	if psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" -d postgres -lqt | cut -d \| -f 1 | grep -qw "$database"; then
 		echo "Database '$database' already exists, skipping creation"
 	else
@@ -21,7 +20,6 @@ EOSQL
 	fi
 }
 
-# Create databases if they don't exist
 if [ -n "$POSTGRES_MULTIPLE_DATABASES" ]; then
 	echo "Multiple database creation requested: $POSTGRES_MULTIPLE_DATABASES"
 	for db in $(echo $POSTGRES_MULTIPLE_DATABASES | tr ',' ' '); do

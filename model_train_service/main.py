@@ -5,15 +5,12 @@ Starts the RabbitMQ consumer to process training jobs and FastAPI server for hea
 """
 import os
 import sys
-import asyncio
 from contextlib import asynccontextmanager
 
-# Add shared module to path
 shared_path = os.path.join(os.path.dirname(__file__), 'shared')
 if os.path.exists(shared_path) and shared_path not in sys.path:
     sys.path.insert(0, shared_path)
 
-# Initialize observability BEFORE importing anything else
 SERVICE_NAME = os.getenv("OTEL_SERVICE_NAME", "training-service")
 
 try:
@@ -39,7 +36,6 @@ from model_trainer import (
     JobStatusTracker
 )
 
-# Global flag to control consumer thread
 _consumer_thread = None
 _consumer_running = False
 
@@ -50,7 +46,6 @@ async def lifespan(app: FastAPI):
     
     logger.info("Training Service starting up...")
     
-    # Start RabbitMQ consumer in background thread
     import threading
     _consumer_running = True
     _consumer_thread = threading.Thread(
@@ -63,12 +58,10 @@ async def lifespan(app: FastAPI):
     
     yield
     
-    # Shutdown
     logger.info("Training Service shutting down...")
     _consumer_running = False
-    # Consumer thread will stop when connection closes
 
-# Create FastAPI app
+
 app = FastAPI(
     title="Training Service",
     description="Processes training jobs from RabbitMQ",
@@ -76,7 +69,6 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# Add Prometheus metrics
 try:
     from prometheus_fastapi_instrumentator import Instrumentator
     instrumentator = Instrumentator()
@@ -85,7 +77,6 @@ try:
 except ImportError:
     logger.warning("prometheus-fastapi-instrumentator not available - metrics disabled")
 
-# Health check endpoint for Kubernetes readiness/liveness probes - Fast (no dependencies)
 @app.get("/health", tags=["Monitoring"], include_in_schema=False)
 async def health_check():
     """
@@ -94,7 +85,6 @@ async def health_check():
     """
     return {"status": "ok"}
 
-# Detailed health check with dependency verification
 @app.get("/health/detailed", tags=["Monitoring"], include_in_schema=False)
 async def detailed_health_check():
     """
@@ -114,7 +104,6 @@ async def detailed_health_check():
             "http_client": http_status
         }
         
-        # Service is healthy if RabbitMQ is connected
         overall_status = "ok" if rabbitmq_status == "online" else "degraded"
         
         return {
@@ -140,7 +129,6 @@ async def root():
         "status": "running"
     }
 
-# Job status endpoint
 @app.get("/jobs/{job_id}/status", tags=["Jobs"])
 async def get_job_status(job_id: str):
     """
@@ -160,10 +148,8 @@ async def get_job_status(job_id: str):
         raise HTTPException(status_code=404, detail="Job not found")
 
 if __name__ == "__main__":
-    # Run FastAPI server
     port = int(os.getenv("PORT", "8003"))
     host = os.getenv("HOST", "0.0.0.0")
     
     logger.info(f"Starting Training Service on {host}:{port}")
     uvicorn.run(app, host=host, port=port, log_config=None)
-

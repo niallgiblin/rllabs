@@ -32,21 +32,17 @@ def setup_rabbitmq_port_forward():
     provides helpful error messages.
     """
     if not is_docker_compose():
-        # Not in docker-compose, skip port-forward setup
         yield
         return
     
     if not check_rabbitmq_via_docker_exec():
-        # RabbitMQ not running, skip
         yield
         return
     
-    # Check if RABBITMQ_PORT is already set (user set it up manually)
     if os.getenv("RABBITMQ_PORT"):
         yield
         return
     
-    # Check if port-forward already exists via docker compose port
     try:
         result = subprocess.run(
             ["docker", "compose", "port", "rabbitmq", "5672"],
@@ -63,10 +59,8 @@ def setup_rabbitmq_port_forward():
     except Exception:
         pass
     
-    # Try to create port-forward using socat (if available)
     if subprocess.run(["which", "socat"], capture_output=True).returncode == 0:
         try:
-            # Get container IP
             container_id = subprocess.run(
                 ["docker", "compose", "ps", "-q", "rabbitmq"],
                 capture_output=True,
@@ -84,19 +78,17 @@ def setup_rabbitmq_port_forward():
                 
                 if container_ip:
                     port = find_free_port()
-                    # Start socat in background
                     socat_process = subprocess.Popen(
                         ["socat", f"TCP-LISTEN:{port},fork,reuseaddr", f"TCP:{container_ip}:5672"],
                         stdout=subprocess.PIPE,
                         stderr=subprocess.PIPE
                     )
-                    time.sleep(0.5)  # Give socat time to start
+                    time.sleep(0.5)  
                     
-                    if socat_process.poll() is None:  # Still running
+                    if socat_process.poll() is None: 
                         os.environ["RABBITMQ_PORT"] = str(port)
-                        print(f"\n✅ Auto-created RabbitMQ port-forward: localhost:{port} -> rabbitmq:5672")
+                        print(f"\nuto-created RabbitMQ port-forward: localhost:{port} -> rabbitmq:5672")
                         yield
-                        # Cleanup
                         socat_process.terminate()
                         socat_process.wait(timeout=2)
                         return
@@ -118,4 +110,3 @@ def rabbitmq_connection():
     connection = get_rabbitmq_connection_or_skip()
     yield connection
     connection.close()
-

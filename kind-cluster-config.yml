@@ -17,7 +17,7 @@ nodes:
   - containerPort: 443
     hostPort: 443
     protocol: TCP
-  # NodePort range for direct access (optional)
+  # NodePort range for direct access
   - containerPort: 30000
     hostPort: 30000
     protocol: TCP

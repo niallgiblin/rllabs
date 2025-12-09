@@ -9,11 +9,6 @@ Key Features:
 2. Presigned URLs for direct client-to-storage access
 3. Content-addressed storage (files stored by SHA-256 hash)
 4. Async operations using aioboto3
-
-Architectural Decision: Why MinIO over filesystem?
-- Pros: Scalable, distributed, S3-compatible, built-in redundancy
-- Cons: Additional infrastructure, network latency
-- Trade-off: Better for distributed systems, worth the complexity
 """
 
 import aioboto3
@@ -32,7 +27,7 @@ class StorageService:
     Wrapper around MinIO/S3 operations
     
     Uses aioboto3 for async operations (non-blocking I/O).
-    This is crucial for handling many concurrent uploads without blocking.
+    This is crucial for handling concurrent uploads without blocking.
     """
     
     def __init__(
@@ -63,16 +58,14 @@ class StorageService:
         self.bucket = bucket
         self.use_ssl = use_ssl
         
-        # aioboto3 session for async operations
-        # Configure connection pooling and retries for better performance
         config = Config(
-            max_pool_connections=50,  # Max connections in connection pool
+            max_pool_connections=50, 
             retries={
-                'max_attempts': 3,  # Retry failed requests
-                'mode': 'adaptive'  # Adaptive retry mode
+                'max_attempts': 3,  
+                'mode': 'adaptive'  
             },
-            connect_timeout=10,  # Connection timeout
-            read_timeout=30  # Read timeout for operations
+            connect_timeout=10,  
+            read_timeout=30  
         )
         self.session = aioboto3.Session()
         self.config = config
@@ -82,7 +75,6 @@ class StorageService:
         Initialize storage (create bucket if needed)
         
         Called on application startup.
-        Idempotent - safe to call multiple times.
         """
         async with self.session.client(
             's3',
@@ -92,11 +84,9 @@ class StorageService:
             config=self.config,
         ) as s3_client:
             try:
-                # Check if bucket exists
                 await s3_client.head_bucket(Bucket=self.bucket)
                 logger.info(f"✓ Storage bucket '{self.bucket}' exists")
             except ClientError as e:
-                # Bucket doesn't exist, create it
                 if e.response['Error']['Code'] == '404':
                     await s3_client.create_bucket(Bucket=self.bucket)
                     logger.info(f"✓ Created storage bucket '{self.bucket}'")
@@ -107,22 +97,14 @@ class StorageService:
     async def initiate_multipart_upload(self, object_key: str) -> str:
         """
         Start a multipart upload session with MinIO
-        
-        Multipart uploads allow:
-        1. Uploading large files in chunks (parallel uploads)
-        2. Resuming failed uploads
-        3. Better error recovery (only retry failed chunks)
-        
+
         Args:
-            object_key: S3 key for the object (e.g., "temp/uuid")
+            object_key: S3 key for the object
         
         Returns:
             MinIO's upload ID for this multipart session
-        
-        Note: Uses internal endpoint since this is server-to-server communication
         """
-        # Use internal endpoint for server operations (not presigned URLs)
-        # Merge connection pooling config with signature config
+
         config = Config(
             max_pool_connections=self.config.max_pool_connections,
             retries=self.config.retries,
@@ -181,11 +163,8 @@ class StorageService:
             Presigned URL that client can use to PUT the chunk
             Uses internal_endpoint if use_internal_endpoint=True, otherwise public_endpoint
         """
-        # Use internal endpoint for service-to-service access, public endpoint for browser access
         presigned_endpoint = self.endpoint if use_internal_endpoint else self.public_endpoint
         
-        # Configure boto3 to use path-style addressing and ensure signature compatibility
-        # Merge connection pooling config with signature config
         config = Config(
             max_pool_connections=self.config.max_pool_connections,
             retries=self.config.retries,
@@ -281,7 +260,6 @@ class StorageService:
             config=self.config,
         ) as s3_client:
             try:
-                # Add timeout: fail fast if MinIO is slow (prevents 7-13s blocking)
                 await asyncio.wait_for(
                     s3_client.abort_multipart_upload(
                         Bucket=self.bucket,
@@ -294,10 +272,8 @@ class StorageService:
                 
             except asyncio.TimeoutError:
                 logger.warning(f"MinIO abort timeout ({timeout}s) for {object_key} - cleanup may be incomplete")
-                # Don't raise - best effort cleanup, timeout is acceptable
             except ClientError as e:
                 logger.warning(f"Failed to abort multipart upload: {e}")
-                # Don't raise - best effort cleanup
     
     async def copy_object(self, source_key: str, dest_key: str):
         """
@@ -354,7 +330,6 @@ class StorageService:
                 
             except ClientError as e:
                 logger.warning(f"Failed to delete object: {e}")
-                # Don't raise - best effort cleanup
     
     async def get_object_info(self, object_key: str) -> Optional[Dict]:
         """
@@ -413,11 +388,8 @@ class StorageService:
             Presigned URL for GET operation
             Uses internal_endpoint if use_internal_endpoint=True, otherwise public_endpoint
         """
-        # Use internal endpoint for service-to-service access, public endpoint for browser access
         presigned_endpoint = self.endpoint if use_internal_endpoint else self.public_endpoint
         
-        # Configure boto3 to use path-style addressing and ensure signature compatibility
-        # Merge connection pooling config with signature config
         config = Config(
             max_pool_connections=self.config.max_pool_connections,
             retries=self.config.retries,

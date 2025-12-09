@@ -1,22 +1,15 @@
 """
-Authorization Service for Artifact Access Control
+Authorisation Service for Artifact Access Control
 ==================================================
 
 Checks if a user has permission to access an artifact before generating presigned URLs.
 
 Authorisation happens in the application layer before generating presigned URLs.
 MinIO doesn't need to know about users/models/permissions - it just stores files.
-
-Architecture Decision:
-- Presigned URLs are time-limited access tokens (security through expiration)
-- RBAC is enforced in our service (where we have business logic)
-- MinIO stays simple (just storage)
-- Result: Secure + Performant (direct client-to-MinIO transfers)
 """
 
 from typing import Optional, Tuple
 from sqlalchemy.orm import Session
-from sqlalchemy import text, and_
 import logging
 import os
 import httpx
@@ -35,7 +28,7 @@ async def check_download_permission(
     """
     Check if user has permission to download an artifact.
     
-    Authorization Rules (in order of priority):
+    Authorisation Rules (in order of priority):
     1. Public downloads: If no user_id provided, allow download (public access)
     2. Owner can always download their artifacts (checked via upload session)
     3. Users with access to the model can download (if artifact belongs to model)
@@ -47,59 +40,40 @@ async def check_download_permission(
         
     Returns:
         Tuple of (is_authorized: bool, error_code: Optional[str])
-        - (True, None) if authorized
+        - (True, None) if authorised
         - (False, "404") if artifact not found (should return 404)
-        - (False, "403") if unauthorized (should return 403)
+        - (False, "403") if unauthorised (should return 403)
         - (False, "400") if invalid input (should return 400)
         
     Security Model:
     - Fail closed: Returns False on any error or missing data
-    - Logs all authorization attempts for audit trail
+    - Logs all authorisation attempts for audit trail
     - Distinguishes between "not found" (404) and "forbidden" (403)
     """
-    # user_id is optional for public downloads
-    # If not provided, we allow public access (no permission check needed)
     
     if not artifact_id:
         logger.warning("Download request without artifact_id - validation error")
-        return False, "400"  # Missing required parameter
+        return False, "400"  
     
-    # Validate artifact_id format (should be sha256:hex)
     if not artifact_id.startswith("sha256:"):
-        # Check if it's a valid hex string without prefix
         if len(artifact_id) == 64 and all(c in '0123456789abcdefABCDEF' for c in artifact_id):
-            # Valid hex but missing prefix - this is acceptable, normalize it
             artifact_id = f"sha256:{artifact_id}"
         else:
-            # Invalid format
             logger.warning(f"Invalid artifact_id format: {artifact_id}")
-            return False, "400"  # Invalid format
+            return False, "400"  
     
-    # Extract hash part (remove sha256: prefix if present)
     hash_part = artifact_id.replace("sha256:", "", 1) if artifact_id.startswith("sha256:") else artifact_id
     
-    # Validate hash length (SHA-256 should be 64 hex characters)
     if len(hash_part) != 64:
         logger.warning(f"Invalid artifact_id length: {len(hash_part)} (expected 64)")
-        return False, "400"  # Invalid format
+        return False, "400"  
     
     try:
-        # Strategy: Check ownership via upload sessions
-        # When an artifact is uploaded, we create an UploadSession with:
-        # - file_hash (the artifact_id/content hash)
-        # - user_id (who uploaded it)
-        # - model_id (which model it belongs to)
-        # - status = COMPLETED or INITIATED (check both for testing)
-        
-        # Find the upload session that created this artifact
-        # Check both COMPLETED and INITIATED (for testing scenarios)
-        # Prefer COMPLETED sessions, but also check INITIATED for testing
         from sqlalchemy import case
         
         session = db.query(UploadSession).filter(
             UploadSession.file_hash == artifact_id
         ).order_by(
-            # Prefer COMPLETED status, then by creation time (newest first)
             case(
                 (UploadSession.status == UploadStatus.COMPLETED, 0),
                 else_=1
@@ -108,8 +82,6 @@ async def check_download_permission(
         ).first()
         
         if not session:
-            # No upload session found, but artifact might exist in storage (e.g., uploaded to different model)
-            # For training jobs, if training_model_id is provided, check access to that model
             if training_model_id:
                 model_catalog_url = os.getenv("MODEL_CATALOG_URL", "http://model-catalog-service:8000")
                 has_model_access = await check_model_access(db, user_id, training_model_id, model_catalog_url)
@@ -119,9 +91,8 @@ async def check_download_permission(
                         f"via training model {training_model_id} permissions (no upload session found)"
                     )
                     return True, None
-            # No session and no training model access - artifact not found in our system
             logger.info(f"No upload session found for artifact {artifact_id} - artifact not found")
-            return False, "404"  # Not found, not forbidden
+            return False, "404"  
         
         # Rule 1: Public downloads (no user_id) - allow access
         if not user_id:
@@ -157,12 +128,11 @@ async def check_download_permission(
             f"User {user_id} denied access to artifact {artifact_id} "
             f"(owner: {session.user_id}, model_id: {session.model_id})"
         )
-        return False, "403"  # Forbidden - user doesn't have permission
+        return False, "403"  
         
     except Exception as e:
         user_context = f"user {user_id}" if user_id else "public user"
         logger.error(f"Error checking download permission for {user_context}, artifact {artifact_id}: {e}")
-        # Fail closed - deny access on error, but return 500 for unexpected errors
         return False, "500"
 
 
@@ -175,10 +145,8 @@ async def check_upload_permission(
     """
     Check if user has permission to upload artifacts for a model.
     
-    Authorization Rules:
+    Authorisation Rules:
     1. Model owner can upload (checked via Model Catalog Service)
-    2. Future: Team members can upload
-    3. Future: Public models allow uploads from anyone
     
     Args:
         db: Database session (not used, but kept for consistency)
@@ -201,8 +169,6 @@ async def check_upload_permission(
         logger.warning("Upload permission check without model_id")
         return False
     
-    # Query Model Catalog Service to check ownership
-    # Uses the same pattern as check_model_access
     if not model_catalog_url:
         model_catalog_url = os.getenv("MODEL_CATALOG_URL", "http://model-catalog-service:8000")
     
@@ -238,7 +204,6 @@ async def check_upload_permission(
         return False
     except httpx.RequestError as e:
         logger.error(f"Failed to connect to Model Catalog: {e}")
-        # Fail closed - if we can't verify, deny access
         return False
     except Exception as e:
         logger.error(f"Error checking upload permission: {e}")
@@ -309,7 +274,6 @@ async def check_model_access(
         return False
     except httpx.RequestError as e:
         logger.error(f"Failed to connect to Model Catalog: {e}")
-        # Fail closed - if we can't verify, deny access
         return False
     except Exception as e:
         logger.error(f"Error checking model access: {e}")

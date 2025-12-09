@@ -9,7 +9,6 @@ logger = logging.getLogger(__name__)
 class Agent:
     def __init__(self, grid_params, dqn_config, model_weights_path):
         self.model = ModelBrain(dqn_config)
-        # Try to load weights, but allow training from scratch if weights don't match
         try:
             state_dict = torch.load(model_weights_path)
             missing_keys, unexpected_keys = self.model.load_state_dict(state_dict, strict=False)
@@ -26,13 +25,11 @@ class Agent:
         self.W = grid_params["grid_width"]
         self.memory = []
         
-        # Convert to lists to allow mutation
         self.agent_pos = list(grid_params["channels"][0])
         self.initial_agent_pos = list(grid_params["channels"][0])
         self.reward_pos = list(grid_params["channels"][1])
         self.initial_reward_pos = list(grid_params["channels"][1])
         
-        # Handle punishment positions (list of tuples/lists)
         self.punishment_positions = [list(pos) for pos in grid_params["channels"][2]]
         self.initial_punishment_pos = [list(pos) for pos in grid_params["channels"][2]]
         
@@ -74,7 +71,6 @@ class Agent:
         elif action == 3 and self.agent_pos[1] < self.W - 1:
             self.agent_pos[1] += 1
 
-        # Compute reward
         if tuple(self.agent_pos) == tuple(self.reward_pos):
             reward = 1.0
             done = True
@@ -82,7 +78,6 @@ class Agent:
             reward = -1.0
             done = True
         else:
-            # small penalty to encourage faster learning
             reward = -0.01
             done = False
 
@@ -134,5 +129,3 @@ class Agent:
         """
         torch.save(self.model.state_dict(), filepath)
         logger.info(f"Model weights saved to {filepath}")
-
-        
