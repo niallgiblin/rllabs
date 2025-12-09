@@ -57,7 +57,7 @@ spec:
               path: /health
               port: 8000
             initialDelaySeconds: 10
-            periodSeconds: 15        # Reduced from 5s to match other services
+            periodSeconds: 15        
             timeoutSeconds: 3
             failureThreshold: 3
           livenessProbe:
@@ -65,16 +65,16 @@ spec:
               path: /health
               port: 8000
             initialDelaySeconds: 30
-            periodSeconds: 30        # Reduced from 10s to match other services
+            periodSeconds: 30       
             timeoutSeconds: 3
             failureThreshold: 3
           resources:
             requests:
               cpu: "100m"
-              memory: "256Mi"  # Increased from 128Mi to prevent OOM kills
+              memory: "256Mi"  
             limits:
               cpu: "200m"
-              memory: "512Mi"  # Increased from 256Mi (2x requests, 100% headroom)
+              memory: "512Mi"  
 ---
 apiVersion: v1
 kind: Service

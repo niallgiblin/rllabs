@@ -410,7 +410,6 @@ const selectedVersion = ref(null)
 const trainingJobs = ref([])
 const loadingJobs = ref(false)
 
-// Auth state
 const showAuth = ref(false)
 const isSignUp = ref(false)
 const authLoading = ref(false)
@@ -430,7 +429,6 @@ const goToCollaboration = () => {
   router.push({ name: 'Collaboration', params: { modelId: model.value.id } })
 }
 
-// Fetch model details
 const fetchModel = async () => {
   try {
     loading.value = true
@@ -444,7 +442,6 @@ const fetchModel = async () => {
       console.log('Model data received:', data)
     } catch (err) {
       console.warn('API unavailable, showing demo model:', err)
-      // Create demo model for UI testing
       data = {
         id: id,
         name: 'Demo PPO Model',
@@ -455,9 +452,7 @@ const fetchModel = async () => {
       }
     }
     
-    // Handle case where API is unavailable (dev mode graceful failure)
     if (!data) {
-      // Create demo model for UI testing
       data = {
         id: id,
         name: 'Demo PPO Model',
@@ -468,7 +463,6 @@ const fetchModel = async () => {
       }
     }
     
-    // Check ownership if authenticated
     if (isAuthenticated.value) {
       try {
         const ownership = await modelsApi.checkOwnership(id)
@@ -479,13 +473,11 @@ const fetchModel = async () => {
       }
     }
     
-    // Fetch versions separately if not included in model response
     let versions = data.versions || []
     console.log('Versions from model response:', versions)
     
     if (!versions || versions.length === 0) {
       try {
-        // Try to fetch versions from the versions endpoint
         console.log('Fetching versions separately...')
         versions = await modelsApi.getVersions(id)
         console.log('Versions fetched separately:', versions)
@@ -495,7 +487,6 @@ const fetchModel = async () => {
       }
     }
     
-    // Sort versions by version number (descending - latest first)
     versions = versions.sort((a, b) => (b.version || 0) - (a.version || 0))
     console.log('Sorted versions:', versions)
     
@@ -511,7 +502,6 @@ const fetchModel = async () => {
     
     console.log('Model state set:', model.value)
     
-    // Fetch training jobs if owner
     if (isAuthenticated.value && isOwner.value) {
       fetchTrainingJobs()
     }
@@ -531,16 +521,12 @@ const trainingForm = ref({
 const creatingJob = ref(false)
 const trainingError = ref(null)
 
-// Helper to normalize artifact IDs (add sha256: prefix if missing)
 const normalizeArtifactId = (id) => {
   if (!id) return id
-  // Already has prefix
   if (id.startsWith('sha256:')) return id
-  // Valid 64-char hex - add prefix
   if (/^[a-f0-9]{64}$/i.test(id.trim())) {
     return `sha256:${id.trim()}`
   }
-  // Return as-is (backend will validate)
   return id
 }
 
@@ -551,7 +537,6 @@ const handleCreateTrainingJob = async () => {
     creatingJob.value = true
     trainingError.value = null
     
-    // Use latest version's artifact ID if model artifact ID not provided
     let modelArtifactId = trainingForm.value.modelArtifactId
     if (!modelArtifactId && model.value.versions && model.value.versions.length > 0) {
       modelArtifactId = model.value.versions[0].content_hash
@@ -561,7 +546,6 @@ const handleCreateTrainingJob = async () => {
       throw new Error('No model artifact ID available. Please upload a model version first.')
     }
     
-    // Normalize all artifact IDs before sending to API
     const configId = normalizeArtifactId(trainingForm.value.configArtifactId)
     const datasetId = normalizeArtifactId(trainingForm.value.datasetArtifactId)
     const normalizedModelId = normalizeArtifactId(modelArtifactId)
@@ -573,10 +557,8 @@ const handleCreateTrainingJob = async () => {
       model_id: model.value.id
     })
     
-    // Refresh training jobs list
     await fetchTrainingJobs()
     
-    // Reset form and close modal
     trainingForm.value = {
       configArtifactId: '',
       datasetArtifactId: '',
@@ -599,12 +581,10 @@ const fetchTrainingJobs = async () => {
   try {
     loadingJobs.value = true
     const jobs = await trainingApi.listJobs()
-    // Handle null response (API unavailable)
     if (!jobs || !Array.isArray(jobs)) {
       trainingJobs.value = []
       return
     }
-    // Filter jobs for this model
     trainingJobs.value = jobs.filter(job => job.model_id === model.value?.id) || []
   } catch (err) {
     console.error('Failed to fetch training jobs:', err)
@@ -643,7 +623,6 @@ const handleDownloadVersion = async (version) => {
     downloading.value = true
     let artifactId = version.content_hash
     
-    // Normalize format
     if (!artifactId.startsWith('sha256:')) {
       if (/^[a-f0-9]{64}$/i.test(artifactId)) {
         artifactId = `sha256:${artifactId}`
@@ -659,9 +638,6 @@ const handleDownloadVersion = async (version) => {
     }
     
     let downloadUrl = downloadData.download_url
-    // Replace internal service names with localhost for browser access
-    // This handles cases where backend generates URLs with internal service names
-    // Browser always needs localhost (or external hostname) since it runs on the host
     if (downloadUrl.includes('minio:9000')) {
       downloadUrl = downloadUrl.replace(/http:\/\/minio:9000/g, 'http://localhost:9000')
     }
@@ -675,7 +651,6 @@ const handleDownloadVersion = async (version) => {
   }
 }
 
-// Download model
 const handleDownload = async () => {
   console.log('Download button clicked', { model: model.value })
   
@@ -693,24 +668,19 @@ const handleDownload = async () => {
   try {
     downloading.value = true
     
-    // Get the latest version (first in sorted array, or highest version number)
     const latestVersion = model.value.versions[0]
     console.log('Latest version:', latestVersion)
     
-    // Extract artifact ID (content_hash)
     let artifactId = latestVersion.content_hash
     
     console.log('Artifact ID from version:', artifactId)
     
-    // Ensure artifact ID is in correct format (sha256:...)
     if (!artifactId) {
       console.error('Version missing content_hash:', latestVersion)
       throw new Error('Version does not have a content hash. The model may not have been fully uploaded.')
     }
     
-    // Normalize format: ensure it starts with 'sha256:'
     if (!artifactId.startsWith('sha256:')) {
-      // If it's just the hash without prefix, add it
       if (/^[a-f0-9]{64}$/i.test(artifactId)) {
         artifactId = `sha256:${artifactId}`
         console.log('Normalized artifact ID:', artifactId)
@@ -721,7 +691,6 @@ const handleDownload = async () => {
     
     console.log('Requesting download URL for:', artifactId)
     
-    // Get download URL from API
     const downloadData = await downloadsApi.getDownloadUrl(artifactId)
     
     console.log('Download response:', downloadData)
@@ -731,15 +700,11 @@ const handleDownload = async () => {
       throw new Error('Invalid download response from server. Please try again.')
     }
     
-    // Replace internal service names with localhost for browser access
-    // This handles cases where backend generates URLs with internal service names
-    // Browser always needs localhost (or external hostname) since it runs on the host
     let downloadUrl = downloadData.download_url
     if (downloadUrl.includes('minio:9000')) {
       downloadUrl = downloadUrl.replace(/http:\/\/minio:9000/g, 'http://localhost:9000')
     }
     
-    // Open download URL in new tab
     console.log('Opening download URL:', downloadUrl)
     window.open(downloadUrl, '_blank')
   } catch (err) {
@@ -798,4 +763,3 @@ onMounted(() => {
   fetchModel()
 })
 </script>
-

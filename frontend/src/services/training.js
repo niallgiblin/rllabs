@@ -1,14 +1,11 @@
-// Training Service API (for future integration)
-// This service will handle model training orchestration and job management
+// This service handles model training orchestration and job management
 
-// Import shared API utilities
 import { apiRequest } from './api.js'
 
 export const training = {
-  // Training Jobs API
   async listJobs() {
     const result = await apiRequest('/api/training-jobs')
-    return result || [] // Return empty array if API unavailable
+    return result || []
   },
   
   async getJob(jobId) {
@@ -36,10 +33,9 @@ export const training = {
     return apiRequest(`/api/training-jobs/${jobId}/status`)
   },
   
-  // Checkpoints API (to be implemented)
   async listCheckpoints(jobId) {
     const result = await apiRequest(`/api/training-jobs/${jobId}/checkpoints`)
-    return result || [] // Return empty array if API unavailable
+    return result || [] 
   },
   
   async getCheckpoint(checkpointId) {

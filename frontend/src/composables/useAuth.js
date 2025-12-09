@@ -1,7 +1,6 @@
 import { ref, computed } from 'vue'
 import { auth, authApi } from '../services/api'
 
-// Global auth state
 const isAuthenticated = ref(auth.isAuthenticated())
 const currentUser = ref(null)
 
@@ -25,7 +24,7 @@ export function useAuth() {
         currentUser.value = user
       } catch (error) {
         console.error("Failed to fetch current user:", error)
-        logout() // Log out if token is invalid
+        logout() 
       }
     }
   }
@@ -39,7 +38,5 @@ export function useAuth() {
   }
 }
 
-// Initial fetch of current user if a token exists
 const { fetchCurrentUser } = useAuth()
 fetchCurrentUser()
-

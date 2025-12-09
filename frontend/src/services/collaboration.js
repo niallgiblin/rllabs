@@ -1,14 +1,11 @@
-// Collaboration Service API (for future integration)
-// This service will handle comments, discussions, and collaboration features
+// This service handles comments, discussions, and collaboration features
 
-// Import shared API utilities
 import { apiRequest } from './api.js'
 
 export const collaboration = {
-  // Comments API (to be implemented)
   async getComments(modelId) {
     const result = await apiRequest(`/api/models/${modelId}/comments`)
-    return result || [] // Return empty array if API unavailable
+    return result || []
   },
   
   async createComment(modelId, comment) {
@@ -35,4 +32,3 @@ export const collaboration = {
 }
 
 export default collaboration
-

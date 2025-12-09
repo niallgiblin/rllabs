@@ -23,7 +23,7 @@ spec:
             - name: MINIO_ENDPOINT
               value: "minio:9000"
             - name: MINIO_PUBLIC_ENDPOINT
-              value: "localhost:9000"  # For browser-accessible presigned URLs (via port-forward)
+              value: "minio.localhost"  
             - name: MINIO_ACCESS_KEY
               value: "minioadmin"
             - name: MINIO_SECRET_KEY
@@ -77,7 +77,7 @@ spec:
               path: /health
               port: 8002
             initialDelaySeconds: 10
-            periodSeconds: 15  # Increased from 5s to reduce load
+            periodSeconds: 15  
             timeoutSeconds: 5
             failureThreshold: 5
           livenessProbe:
@@ -85,15 +85,15 @@ spec:
               path: /health
               port: 8002
             initialDelaySeconds: 30
-            periodSeconds: 30  # Increased from 10s to reduce load
+            periodSeconds: 30  
             timeoutSeconds: 5
             failureThreshold: 3
           resources:
             requests:
-              cpu: "250m"  # Increased from 100m to prevent CPU throttling
+              cpu: "250m"  
               memory: "256Mi"
             limits:
-              cpu: "1000m"  # Increased from 500m (2x requests minimum)
+              cpu: "1000m"  
               memory: "512Mi"
 ---
 apiVersion: v1

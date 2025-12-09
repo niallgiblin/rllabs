@@ -259,13 +259,10 @@ spec:
           resources:
             requests:
               cpu: "50m"
-              memory: "256Mi"   # mongosh (Node.js) needs more memory
+              memory: "256Mi"   
             limits:
               cpu: "200m"
-              memory: "512Mi"   # Increased from 128Mi - mongosh was OOMKilled
-          # Note: Sidecar container doesn't need readiness/liveness probes
-          # It's a helper that runs the init script - probes would just add OOM pressure
-          # The main mongodb container has its own probes
+              memory: "512Mi"   
   volumeClaimTemplates:
     - metadata:
         name: mongodb-data

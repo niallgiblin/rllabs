@@ -9,7 +9,7 @@ This service manages secure file uploads and downloads for model artifacts using
 import os
 import sys
 
-shared_path = os.path.join(os.path.dirname(__file__), 'shared')
+shared_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'shared'))
 if os.path.exists(shared_path) and shared_path not in sys.path:
     sys.path.insert(0, shared_path)
 
@@ -345,7 +345,7 @@ async def complete_upload(
             result['catalog_message'] = f"{artifact_type} artifacts are not registered as model versions"
             result['version'] = None  
         
-        def publish_event():
+        def publish_events():
             try:
                 publisher = get_event_publisher()
                 if publisher:
@@ -359,9 +359,20 @@ async def complete_upload(
                         filename=result['filename']
                     )
                     logger.info(f"Published ArtifactUploaded event for {result['artifact_id']}")
+                    
+                    publisher.publish_artifact_committed(
+                        artifact_id=result['artifact_id'],
+                        model_id=result.get('model_id'),  
+                        storage_path=result['storage_path'],
+                        content_hash=result['artifact_id'], 
+                        uploaded_by=user_id,
+                        file_size=result['file_size'],
+                        filename=result['filename']
+                    )
+                    logger.info(f"Published ArtifactCommitted event for {result['artifact_id']}")
             except Exception as e:
-                logger.warning(f"Failed to publish ArtifactUploaded event: {e}")
-        background_tasks.add_task(publish_event)
+                logger.warning(f"Failed to publish events: {e}")
+        background_tasks.add_task(publish_events)
         
         return UploadCompleteResponse(**result)
         

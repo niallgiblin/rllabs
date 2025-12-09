@@ -250,7 +250,7 @@ const postComment = async (parentId, content) => {
     if (!parentId) {
       newCommentContent.value = ''
     }
-    fetchComments() // Refresh comments
+    fetchComments() 
   } catch (err) {
     alert('Failed to post comment: ' + err.message)
   }
@@ -259,7 +259,7 @@ const postComment = async (parentId, content) => {
 const updateComment = async (commentId, content) => {
   try {
     await collaboration.updateComment(commentId, { content })
-    fetchComments() // Refresh comments
+    fetchComments() 
   } catch (err) {
     alert('Failed to update comment: ' + err.message)
   }

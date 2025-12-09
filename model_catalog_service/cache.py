@@ -2,7 +2,7 @@
 Redis Cache Module for Model Catalog Service
 =============================================
 
-Implements the Cache-Aside (Lazy Loading) pattern:
+Implements the Cache-Aside pattern:
 1. Check cache first on reads
 2. On cache miss, load from database and populate cache
 3. Invalidate cache on writes
@@ -28,35 +28,31 @@ import logging
 from typing import Optional, Any, List
 from functools import wraps
 
-# Use orjson for faster JSON serialization (20-40% CPU reduction)
 try:
     import orjson
     ORJSON_AVAILABLE = True
 except ImportError:
     ORJSON_AVAILABLE = False
-    import json as orjson  # Fallback to standard json
+    import json as orjson  
 
 logger = logging.getLogger(__name__)
 
-# Redis configuration
 REDIS_HOST = os.getenv("REDIS_HOST", "redis-master")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
 REDIS_SENTINEL_HOSTS = os.getenv("REDIS_SENTINEL_HOSTS", "")
 REDIS_SENTINEL_MASTER_NAME = os.getenv("REDIS_SENTINEL_MASTER_NAME", "mymaster")
-CACHE_TTL = int(os.getenv("CACHE_TTL", "300"))  # 5 minutes default - balance between freshness and performance
+CACHE_TTL = int(os.getenv("CACHE_TTL", "300"))  
 
-# Different TTLs for different data types (optimized for read-heavy workloads)
-MODEL_CACHE_TTL = int(os.getenv("MODEL_CACHE_TTL", "1800"))  # 30 minutes for models (read-heavy, rarely change)
-VERSION_CACHE_TTL = int(os.getenv("VERSION_CACHE_TTL", "1800"))  # 30 minutes for versions (read-heavy, rarely change)
-LIST_CACHE_TTL = int(os.getenv("LIST_CACHE_TTL", "300"))  # 5 minutes for lists (more dynamic)
-OWNERSHIP_CACHE_TTL = int(os.getenv("OWNERSHIP_CACHE_TTL", "1800"))  # 30 minutes for ownership checks
+MODEL_CACHE_TTL = int(os.getenv("MODEL_CACHE_TTL", "1800"))  
+VERSION_CACHE_TTL = int(os.getenv("VERSION_CACHE_TTL", "1800")) 
+LIST_CACHE_TTL = int(os.getenv("LIST_CACHE_TTL", "300")) 
+OWNERSHIP_CACHE_TTL = int(os.getenv("OWNERSHIP_CACHE_TTL", "1800"))  
 
-# Cache key prefixes
 PREFIX = "model_catalog"
 MODELS_LIST_KEY = f"{PREFIX}:models:list"
-MODEL_KEY = f"{PREFIX}:models"  # + :{id}
-VERSIONS_KEY = f"{PREFIX}:versions"  # + :model:{id} or :hash:{hash}
+MODEL_KEY = f"{PREFIX}:models" 
+VERSIONS_KEY = f"{PREFIX}:versions"  
 
 
 class CacheClient:
@@ -72,18 +68,16 @@ class CacheClient:
         self._failure_count = 0
         self._max_failures = 5
         self._circuit_open = False
-        # Cache hit/miss tracking for monitoring
         self._hit_count = 0
         self._miss_count = 0
-        self._hit_count_by_endpoint = {}  # endpoint -> hit count
-        self._miss_count_by_endpoint = {}  # endpoint -> miss count
+        self._hit_count_by_endpoint = {}  
+        self._miss_count_by_endpoint = {}  
         
     @property
     def client(self) -> Optional[redis.Redis]:
         """Lazy initialization of Redis client with connection pooling (Sentinel-aware)"""
         if self._client is None:
             try:
-                # Try Sentinel first if configured
                 if REDIS_SENTINEL_HOSTS and REDIS_SENTINEL_MASTER_NAME:
                     from redis.sentinel import Sentinel
                     
@@ -98,29 +92,24 @@ class CacheClient:
                     
                     sentinel = Sentinel(
                         sentinel_hosts,
-                        socket_timeout=0.5,  # Reduced timeout for faster failures
+                        socket_timeout=0.5,  
                         socket_connect_timeout=0.5,
                         password=REDIS_PASSWORD if REDIS_PASSWORD else None
                     )
                     
-                    # Get master connection - Redis Sentinel handles connection pooling automatically
-                    # The master_for() method returns a client with built-in connection pooling
                     self._client = sentinel.master_for(
                         REDIS_SENTINEL_MASTER_NAME,
                         password=REDIS_PASSWORD if REDIS_PASSWORD else None,
                         db=0,
                         decode_responses=True,
-                        socket_timeout=0.5,  # Fast timeout for cache lookups
+                        socket_timeout=0.5, 
                         socket_connect_timeout=0.5,
                         retry_on_timeout=False
                     )
                     
-                    # Test connection
                     self._client.ping()
-                    logger.info(f"✅ Cache connected via Redis Sentinel ({len(sentinel_hosts)} sentinels), master: {REDIS_SENTINEL_MASTER_NAME}")
+                    logger.info(f"Cache connected via Redis Sentinel ({len(sentinel_hosts)} sentinels), master: {REDIS_SENTINEL_MASTER_NAME}")
                 else:
-                    # Fallback to direct connection - Redis client has built-in connection pooling
-                    # Create connection pool explicitly for better performance
                     from redis.connection import ConnectionPool
                     pool = ConnectionPool(
                         host=REDIS_HOST,
@@ -133,7 +122,6 @@ class CacheClient:
                         decode_responses=True
                     )
                     self._client = redis.Redis(connection_pool=pool)
-                    # Test connection
                     self._client.ping()
                     logger.info(f"Cache connected to Redis at {REDIS_HOST}:{REDIS_PORT} with connection pooling")
                 
@@ -179,23 +167,18 @@ class CacheClient:
             value = client.get(key)
             if value:
                 self._record_success()
-                # Increment counters (thread-safe increment)
                 self._hit_count += 1
                 if endpoint:
                     if endpoint not in self._hit_count_by_endpoint:
                         self._hit_count_by_endpoint[endpoint] = 0
                     self._hit_count_by_endpoint[endpoint] += 1
                 logger.debug(f"Cache HIT: {key} (total hits: {self._hit_count})")
-                # Use orjson for faster deserialization
                 if ORJSON_AVAILABLE:
-                    # orjson.loads expects bytes, but Redis with decode_responses=True returns str
-                    # Encode to bytes if it's a string
                     if isinstance(value, str):
                         value = value.encode('utf-8')
                     return orjson.loads(value)
                 else:
                     return json.loads(value)
-            # Cache miss - increment counters
             self._miss_count += 1
             if endpoint:
                 if endpoint not in self._miss_count_by_endpoint:
@@ -222,7 +205,6 @@ class CacheClient:
                 return False
                 
             ttl = ttl or CACHE_TTL
-            # Use orjson for faster serialization (20-40% CPU reduction)
             if ORJSON_AVAILABLE:
                 serialized = orjson.dumps(value, default=str).decode('utf-8')
             else:
@@ -301,7 +283,6 @@ class CacheClient:
                 2
             ) if total_requests > 0 else 0.0
             
-            # Calculate hit rates per endpoint
             endpoint_stats = {}
             for endpoint in set(list(self._hit_count_by_endpoint.keys()) + list(self._miss_count_by_endpoint.keys())):
                 hits = self._hit_count_by_endpoint.get(endpoint, 0)
@@ -334,7 +315,6 @@ class CacheClient:
             return {"status": "error", "error": str(e)}
 
 
-# Singleton cache client
 _cache_client: Optional[CacheClient] = None
 
 def get_cache() -> CacheClient:
@@ -345,9 +325,7 @@ def get_cache() -> CacheClient:
     return _cache_client
 
 
-# ============================================================================
-# Cache Key Helpers
-# ============================================================================
+# Cache helpers
 
 def model_key(model_id: int) -> str:
     """Cache key for a single model"""
@@ -369,9 +347,7 @@ def version_hash_key(content_hash: str) -> str:
     return f"{VERSIONS_KEY}:hash:{content_hash}"
 
 
-# ============================================================================
-# Cache Operations (High-Level API)
-# ============================================================================
+# Cache operators
 
 def cache_models_list(models: List[dict]) -> None:
     """Cache the models list (legacy - for backward compatibility)"""
@@ -442,26 +418,19 @@ def get_cached_model_ownership(model_id: int, user_id: str) -> Optional[dict]:
     return get_cache().get(model_ownership_key(model_id, user_id), endpoint=f"GET /models/{model_id}/ownership")
 
 
-# ============================================================================
 # Cache Invalidation
-# ============================================================================
 
 def invalidate_models_list() -> None:
     """Invalidate the models list cache (both paginated and non-paginated)"""
     cache = get_cache()
-    # Delete the main list cache
     cache.delete(MODELS_LIST_KEY)
-    # Also delete all paginated list caches (pattern: models:list:page:*:size:*)
     try:
-        # Delete all keys matching the paginated pattern
         pattern = f"{MODELS_LIST_KEY}:page:*"
         cache.delete_pattern(pattern)
     except Exception as e:
-        # If pattern deletion fails, try to delete common page sizes manually
         logger.warning(f"Failed to delete paginated cache pattern: {e}")
-        # Best effort: delete a few common page sizes
         for page_size in [10, 20, 50, 100]:
-            for page in range(1, 11):  # Delete first 10 pages
+            for page in range(1, 11):  
                 try:
                     cache.delete(f"{MODELS_LIST_KEY}:page:{page}:size:{page_size}")
                 except Exception:
@@ -474,14 +443,12 @@ def invalidate_model(model_id: int) -> None:
     cache.delete(model_key(model_id))
     cache.delete(model_latest_key(model_id))
     cache.delete(model_versions_key(model_id))
-    # Also invalidate the list since model data changed (both paginated and non-paginated)
     cache.delete(MODELS_LIST_KEY)
-    # Invalidate paginated caches
     try:
         pattern = f"{MODELS_LIST_KEY}:page:*"
         cache.delete_pattern(pattern)
     except Exception:
-        pass  # Best effort
+        pass  
     logger.info(f"Invalidated cache for model {model_id}")
 
 def invalidate_model_versions(model_id: int) -> None:
@@ -500,10 +467,7 @@ def invalidate_model_ownership(model_id: int) -> None:
     logger.info(f"Invalidated ownership cache for model {model_id}")
 
 
-# ============================================================================
 # Decorator for Cache-Aside Pattern
-# ============================================================================
-
 def cached(key_func, ttl: int = None):
     """
     Decorator implementing cache-aside pattern.
@@ -516,22 +480,17 @@ def cached(key_func, ttl: int = None):
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
-            # Generate cache key
             cache_key = key_func(*args, **kwargs)
             
-            # Try cache first
             cached_value = get_cache().get(cache_key)
             if cached_value is not None:
                 return cached_value
             
-            # Cache miss - call function
             result = func(*args, **kwargs)
             
-            # Store in cache
             if result is not None:
                 get_cache().set(cache_key, result, ttl)
             
             return result
         return wrapper
     return decorator
-

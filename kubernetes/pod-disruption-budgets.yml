@@ -9,7 +9,7 @@ kind: PodDisruptionBudget
 metadata:
   name: api-gateway-pdb
 spec:
-  minAvailable: 1  # At least 1 pod must be available
+  minAvailable: 1  
   selector:
     matchLabels:
       app: api-gateway
@@ -48,14 +48,14 @@ spec:
       app: collaboration-service
 
 ---
-# For stateful services, we use maxUnavailable instead
-# This ensures we don't lose quorum in replica sets
+# For stateful services, use maxUnavailable instead
+# This ensures don't lose quorum in replica sets
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
   name: mongodb-pdb
 spec:
-  maxUnavailable: 1  # Can lose 1 pod, but not 2 (need majority for replica set)
+  maxUnavailable: 1  
   selector:
     matchLabels:
       app: mongodb

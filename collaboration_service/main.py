@@ -4,20 +4,16 @@ Collaboration Service - Main Application
 Manages comments and collaboration features for models.
 """
 
-# =============================================================================
-# OBSERVABILITY SETUP (must be first, before other imports)
-# =============================================================================
+# Observability Setup
 import os
 import sys
 
-# Add shared module to path
-shared_path = os.path.join(os.path.dirname(__file__), 'shared')
+shared_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'shared'))
 if os.path.exists(shared_path) and shared_path not in sys.path:
     sys.path.insert(0, shared_path)
 
 SERVICE_NAME = os.getenv("OTEL_SERVICE_NAME", "collaboration-service")
 
-# Initialize structured logging and tracing
 try:
     from observability import setup_logging, setup_tracing, get_logger
     
@@ -31,12 +27,10 @@ except ImportError:
     logger = logging.getLogger(__name__)
     logger.warning("Observability module not available, using basic logging")
 
-# =============================================================================
-# APPLICATION IMPORTS
-# =============================================================================
+
+
 from fastapi import FastAPI, HTTPException, status, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from datetime import datetime
 from bson import ObjectId
 from bson.errors import InvalidId
@@ -48,6 +42,8 @@ from helpers import doc_to_response, build_tree, get_model_creator
 from database import comments_collection, cache, create_indexes
 from events import publish_comment_created, start_event_subscriber
 
+
+
 app = FastAPI(
     title="Collaboration Service",
     description="Service for managing comments and collaboration on models",
@@ -55,16 +51,14 @@ app = FastAPI(
 )
 
 
-# Add CORS Middleware --> Allows browser to fetch data
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # CHNAGE THIS IF WE DEPLOY
+    allow_origins=["*"], 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Add Prometheus metrics
 try:
     from prometheus_fastapi_instrumentator import Instrumentator
     instrumentator = Instrumentator()
@@ -84,7 +78,6 @@ def startup():
     
     create_indexes()
     
-    # Pre-warm model creator cache for better hit rates
     from helpers import prewarm_model_creator_cache
     try:
         prewarm_model_creator_cache()
@@ -92,12 +85,10 @@ def startup():
     except Exception as e:
         logger.warning(f"Failed to pre-warm cache: {e}")
     
-    # Start event subscriber in background thread
     thread = threading.Thread(target=start_event_subscriber, daemon=True)
     thread.start()
     logger.info("Event subscriber started")
 
-# Health check endpoint for Kubernetes readiness/liveness probes - Fast (no dependencies)
 @app.get("/health", tags=["Monitoring"])
 def health_check():
     """
@@ -106,7 +97,6 @@ def health_check():
     """
     return {"status": "ok"}
 
-# Detailed health check with dependency verification
 @app.get("/health/detailed", tags=["Monitoring"])
 def detailed_health_check():
     """
@@ -114,7 +104,6 @@ def detailed_health_check():
     Use this for monitoring dashboards, not for Kubernetes probes.
     """
     try:
-        # Check MongoDB connectivity
         comments_collection.database.client.admin.command('ping')
         mongo_status = "online"
     except Exception as e:
@@ -122,7 +111,6 @@ def detailed_health_check():
         mongo_status = "offline"
     
     try:
-        # Check Redis connectivity
         if cache:
             cache.ping()
             redis_status = "online"
@@ -169,27 +157,20 @@ def create_comment(model_id: str, comment: CommentCreate, background_tasks: Back
     result = comments_collection.insert_one(doc)
     doc["_id"] = result.inserted_id
     
-    # Invalidate cache for this model (all pages and count)
     try:
         if cache:
-            # Delete all comment pages for this model (pattern matching)
-            # Note: Redis doesn't support pattern delete in single command, so we delete known patterns
-            # For simplicity, we'll delete the count cache and let page caches expire naturally
             cache.delete(f"comments:count:{model_id}")
-            # Also try to delete common page patterns (fail-open if not found)
-            for page in range(1, 11):  # Delete first 10 pages (most common)
+            for page in range(1, 11): 
                 try:
                     cache.delete(f"comments:{model_id}:page:{page}:limit:50")
                 except:
                     pass
     except Exception:
-        pass  # Fail-open: cache failures don't break the service
+        pass  
     
-    # Get creator for response
     creator_id = get_model_creator(model_id)
     response_data = doc_to_response(doc, creator_id)
     
-    # Publish CommentCreated event in background (non-blocking)
     background_tasks.add_task(publish_comment_created, response_data)
     
     return response_data
@@ -215,7 +196,6 @@ def get_comments(model_id: str, page: int = 1, limit: int = 50):
     cache_key = f"comments:{model_id}:page:{page}:limit:{limit}"
     count_cache_key = f"comments:count:{model_id}"
     
-    # Try cache first (fail-open: if cache fails, just query DB)
     cached_result = None
     try:
         if cache:
@@ -223,16 +203,13 @@ def get_comments(model_id: str, page: int = 1, limit: int = 50):
             if cached:
                 cached_result = json.loads(cached)
     except Exception:
-        pass  # Cache miss or error, continue to DB query
+        pass  
     
     if cached_result is not None:
         return cached_result
     
-    # Fetch creator once for all comments (cached internally)
     creator_id = get_model_creator(model_id)
     
-    # Get total count of top-level comments (for pagination metadata)
-    # Cache count separately - counts change less frequently than comments
     total_top_level = None
     try:
         if cache:
@@ -240,22 +217,19 @@ def get_comments(model_id: str, page: int = 1, limit: int = 50):
             if cached_count:
                 total_top_level = int(cached_count)
     except Exception:
-        pass  # Cache miss, will query DB
+        pass  
     
     if total_top_level is None:
-        # Cache miss - query MongoDB (use index on modelId + parentId)
         total_top_level = comments_collection.count_documents({
             "modelId": model_id,
             "parentId": None
         })
-        # Cache count for 10 minutes (counts change less frequently than comments)
         try:
             if cache:
                 cache.setex(count_cache_key, 600, str(total_top_level))
         except Exception:
-            pass  # Cache write failed, but we have the data
+            pass  
     
-    # Paginate at database level: get top-level comments for this page
     skip = (page - 1) * limit
     top_level_cursor = (
         comments_collection
@@ -266,28 +240,19 @@ def get_comments(model_id: str, page: int = 1, limit: int = 50):
     )
     top_level_comments = [doc_to_response(doc, creator_id) for doc in top_level_cursor]
     
-    # Get all replies for these top-level comments (optimized: single query + in-memory filtering)
-    # Instead of recursive queries (N queries where N = depth), fetch all replies once and filter
-    # This is much faster for deep comment trees
     if top_level_comments:
         top_level_ids = [str(comment["id"]) for comment in top_level_comments]
         
-        # Single query: Get ALL replies for this model (non-top-level comments)
-        # Then filter in-memory to only those that are descendants of our top-level comments
         all_replies_cursor = comments_collection.find({
             "modelId": model_id,
-            "parentId": {"$ne": None}  # All replies (non-top-level comments)
+            "parentId": {"$ne": None}  
         })
         
-        # Build set of valid parent IDs (starts with top-level, grows as we find replies)
         valid_parent_ids = set(top_level_ids)
         replies_in_tree = []
         
-        # First pass: collect all replies
         all_replies_docs = list(all_replies_cursor)
         
-        # Second pass: filter to only replies in our tree (iterative approach)
-        # Keep iterating until no new replies are found (handles arbitrary depth)
         changed = True
         while changed:
             changed = False
@@ -295,16 +260,13 @@ def get_comments(model_id: str, page: int = 1, limit: int = 50):
                 reply_id = str(reply_doc["_id"])
                 reply_parent_id = str(reply_doc.get("parentId", ""))
                 
-                # If this reply's parent is in the tree, add this reply to the tree
                 if reply_parent_id in valid_parent_ids and reply_id not in valid_parent_ids:
                     replies_in_tree.append(reply_doc)
                     valid_parent_ids.add(reply_id)
                     changed = True
         
-        # Convert to response format
         replies = [doc_to_response(doc, creator_id) for doc in replies_in_tree]
         
-        # Combine top-level and replies, then build tree
         all_comments = top_level_comments + replies
         paginated_tree = build_tree(all_comments)
     else:
@@ -320,17 +282,13 @@ def get_comments(model_id: str, page: int = 1, limit: int = 50):
         }
     }
     
-    # Cache for 5 min (fail-open: if cache fails, just continue)
     try:
         if cache:
             cache.setex(cache_key, 300, json.dumps(result))
-            # Also invalidate count cache when comments change (handled in create/update/delete)
     except Exception:
-        pass  # Cache write failed, but we have the data
+        pass  
     
     return result
-
-
 
 
 
@@ -344,7 +302,6 @@ def get_comment(comment_id: str):
     Get a specific comment by ID
     """
     try:
-        # Validate ObjectId format first - this will raise InvalidId if format is wrong
         try:
             object_id = ObjectId(comment_id)
         except InvalidId:
@@ -354,7 +311,6 @@ def get_comment(comment_id: str):
         if not comment:
             raise HTTPException(status_code=404, detail="Comment not found")
         
-        # Get creator for badge
         creator_id = get_model_creator(comment["modelId"])
         return doc_to_response(comment, creator_id)
     except HTTPException:
@@ -370,13 +326,11 @@ def update_comment(comment_id: str, update: CommentUpdate):
     """
     
     try:
-        # Validate ObjectId format first - this will raise InvalidId if format is wrong
         try:
             object_id = ObjectId(comment_id)
         except InvalidId:
             raise HTTPException(status_code=400, detail="Invalid comment ID format")
         
-        # Get comment first to know which model cache to invalidate
         comment = comments_collection.find_one({"_id": object_id})
         if not comment:
             raise HTTPException(status_code=404, detail="Comment not found")
@@ -391,19 +345,17 @@ def update_comment(comment_id: str, update: CommentUpdate):
             }
         )
         
-        # Invalidate cache (all pages and count)
         try:
             if cache:
                 model_id = comment['modelId']
                 cache.delete(f"comments:count:{model_id}")
-                # Delete common page patterns
                 for page in range(1, 11):
                     try:
                         cache.delete(f"comments:{model_id}:page:{page}:limit:50")
                     except:
                         pass
         except Exception:
-            pass  # Fail-open: cache failures don't break the service
+            pass  
         
     except HTTPException:
         raise
@@ -423,59 +375,49 @@ def delete_comment(comment_id: str):
     """
     
     try:
-        # Validate ObjectId format first - this will raise InvalidId if format is wrong
         try:
             object_id = ObjectId(comment_id)
         except InvalidId:
             raise HTTPException(status_code=400, detail="Invalid comment ID format")
         
-        # Find comment to check if it exists
         comment = comments_collection.find_one({"_id": object_id})
         if not comment:
             raise HTTPException(status_code=404, detail="Comment not found")
         
         model_id = comment["modelId"]
         
-        # Recursively collect all descendant IDs
         def get_all_descendants(parent_id):
             """Find all descendants (children, grandchildren, etc)"""
             descendants = []
             
-            # Find direct children
             children = comments_collection.find({"parentId": parent_id})
             
             for child in children:
                 child_id = str(child["_id"])
                 descendants.append(child_id)
-                # Recursively get this child's descendants
                 descendants.extend(get_all_descendants(child_id))
             
             return descendants
         
-        # Get all descendants
         all_descendants = get_all_descendants(comment_id)
         
-        # Delete the original comment
         comments_collection.delete_one({"_id": object_id})
         
-        # Delete all descendants
         if all_descendants:
             comments_collection.delete_many({
                 "_id": {"$in": [ObjectId(id) for id in all_descendants]}
             })
         
-        # Invalidate cache (all pages and count)
         try:
             if cache:
                 cache.delete(f"comments:count:{model_id}")
-                # Delete common page patterns
                 for page in range(1, 11):
                     try:
                         cache.delete(f"comments:{model_id}:page:{page}:limit:50")
                     except:
                         pass
         except Exception:
-            pass  # Fail-open: cache failures don't break the service
+            pass  
         
     except HTTPException:
         raise
@@ -483,9 +425,3 @@ def delete_comment(comment_id: str):
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
     
     return {"message": "Comment deleted"}
-
-
-
-
-
-app.mount("/", StaticFiles(directory="static", html=True), name="static")

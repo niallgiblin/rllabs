@@ -6,16 +6,16 @@ kind: Ingress
 metadata:
   name: minio-ingress
   annotations:
-    nginx.ingress.kubernetes.io/proxy-body-size: "500m"  # Large file uploads
+    nginx.ingress.kubernetes.io/proxy-body-size: "500m"  
     nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
     nginx.ingress.kubernetes.io/proxy-connect-timeout: "60"
-    nginx.ingress.kubernetes.io/proxy-buffering: "off"  # Important for streaming uploads
-    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"  # Disable request buffering for uploads
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"  
+    nginx.ingress.kubernetes.io/proxy-request-buffering: "off" 
 spec:
   ingressClassName: nginx
   rules:
-    - host: minio.localhost  # Use localhost subdomain for local testing
+    - host: minio.localhost 
       http:
         paths:
           - path: /

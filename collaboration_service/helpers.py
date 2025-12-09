@@ -1,8 +1,6 @@
 from database import models_collection, cache
 
 
-# Cache for model creator lookups (TTL: 1 hour, rarely changes)
-# Pre-warm cache on startup for better hit rates
 _model_creator_cache_prewarmed = False
 
 def prewarm_model_creator_cache():
@@ -12,7 +10,6 @@ def prewarm_model_creator_cache():
         return
     
     try:
-        # Pre-warm with first 100 models (most commonly accessed)
         models = models_collection.find({}).limit(100)
         for model in models:
             model_id = model.get("modelId")
@@ -22,7 +19,7 @@ def prewarm_model_creator_cache():
                 cache.setex(cache_key, 3600, str(creator_id) if creator_id else "None")
         _model_creator_cache_prewarmed = True
     except Exception:
-        pass  # Fail-open: pre-warming is optional
+        pass  
 
 def get_model_creator(model_id: str) -> str:
     """
@@ -34,7 +31,6 @@ def get_model_creator(model_id: str) -> str:
     - Uses MongoDB index on modelId for fast queries
     - Long TTL (1 hour) since creator rarely changes
     """
-    # Try cache first
     cache_key = f"model_creator:{model_id}"
     if cache:
         try:
@@ -42,13 +38,11 @@ def get_model_creator(model_id: str) -> str:
             if cached_creator:
                 return cached_creator if cached_creator != "None" else None
         except Exception:
-            pass  # Cache miss or error, continue to DB
+            pass  
     
-    # Cache miss - query MongoDB (uses index on modelId)
-    # Only fetch creatorId field for better performance
     model = models_collection.find_one(
         {"modelId": model_id},
-        {"creatorId": 1}  # Projection: only fetch creatorId field
+        {"creatorId": 1}  
     )
     
     if not model:
@@ -56,12 +50,11 @@ def get_model_creator(model_id: str) -> str:
     else:
         creator_id = model.get("creatorId")
     
-    # Cache the result (1 hour TTL - creator rarely changes)
     if cache:
         try:
             cache.setex(cache_key, 3600, str(creator_id) if creator_id else "None")
         except Exception:
-            pass  # Cache write failed, but we have the data
+            pass  
     
     return creator_id
 
@@ -74,7 +67,6 @@ def doc_to_response(doc, creator_id=None) -> dict:
     creator_id: pass once to avoid N+1 queries
     """
     
-    # Check if author is model creator for badge
     is_creator = (creator_id == doc["authorId"]) if creator_id else False
     
     return {
@@ -83,7 +75,7 @@ def doc_to_response(doc, creator_id=None) -> dict:
         "content": doc["content"],
         "authorId": doc["authorId"],
         "authorName": doc["authorName"],
-        "isCreator": is_creator,  # Badge flag
+        "isCreator": is_creator,  
         "parentId": doc.get("parentId"),
         "createdAt": doc["createdAt"].isoformat(),
         "updatedAt": doc["updatedAt"].isoformat(),
@@ -100,29 +92,22 @@ def build_tree(comments: list[dict]) -> list[dict]:
     Build nested tree from flat comments
     """
     
-    # First pass: create map and initialize replies list
     comment_map = {}
     for c in comments:
-        c["replies"] = []  # Initialize empty replies
+        c["replies"] = []  
         comment_map[c["id"]] = c
     
     
-    # Second pass: build tree structure
     roots = []
     for comment in comments:
         
-        # If comment is reply --> add to parent
         if comment["parentId"]:
             parent = comment_map.get(comment["parentId"])
             
             if parent:
                 parent["replies"].append(comment)
-                # If parent doesn't exist, orphaned comment --> I think this should NOT happend, 
-                # but I leave this error handling just in case
-            
             
         else:
-            # Else --> It's top level comment 
             roots.append(comment)
     
     return roots

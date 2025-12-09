@@ -164,6 +164,27 @@ fi
 echo "  Images built and loaded"
 echo ""
 
+echo -e "${BLUE}STEP 0.5: Applying Resource Quotas and Limits${NC}"
+echo "───────────────────────────────────────────────────────────────"
+echo "  Setting up resource quotas and limit ranges..."
+kubectl apply -f kubernetes/resource-quotas.yml 2>/dev/null || true
+echo "  Resource quotas and limits applied"
+echo ""
+
+echo -e "${BLUE}STEP 0.6: Installing Ingress Controller${NC}"
+echo "───────────────────────────────────────────────────────────────"
+echo "  Checking for ingress controller..."
+if kubectl get ingressclass nginx >/dev/null 2>&1; then
+    echo "  Ingress controller already installed"
+else
+    echo "  Installing nginx ingress controller..."
+    kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/kind/deploy.yaml 2>/dev/null || true
+    echo "  Waiting for ingress controller to be ready..."
+    kubectl wait --namespace ingress-nginx --for=condition=ready pod --selector=app.kubernetes.io/component=controller --timeout=120s 2>/dev/null || true
+    echo "  Ingress controller installed"
+fi
+echo ""
+
 echo -e "${BLUE}STEP 1: Applying Infrastructure Manifests${NC}"
 echo "───────────────────────────────────────────────────────────────"
 
@@ -176,6 +197,7 @@ kubectl delete svc minio-hl 2>/dev/null || true
 kubectl delete job minio-create-buckets 2>/dev/null || true
 kubectl delete pvc -l app=minio 2>/dev/null || true
 kubectl apply -f kubernetes/minio.yml 2>/dev/null || true
+kubectl apply -f kubernetes/minio-ingress.yml 2>/dev/null || true
 
 echo "  Manifests applied"
 echo ""
@@ -285,6 +307,9 @@ done
 echo "  Setting proper replica counts (based on performance fixes)..."
 kubectl scale deployment model-catalog-service --replicas=3 2>/dev/null || true
 kubectl scale deployment api-gateway --replicas=2 2>/dev/null || true
+
+echo "  Applying Pod Disruption Budgets for high availability..."
+kubectl apply -f kubernetes/pod-disruption-budgets.yml 2>/dev/null || true
 
 echo "  Application manifests applied and restarted"
 echo "  Waiting 90 seconds for applications to start..."
@@ -537,30 +562,6 @@ else
 fi
 
 echo ""
-if kubectl get svc minio >/dev/null 2>&1; then
-    cleanup_port_forward "minio" "9000"
-    sleep 1
-    if check_port 9000; then
-        echo -e "  ${YELLOW}⚠️  Port 9000 is still in use. Skipping MinIO...${NC}"
-        echo "     To manually set up:"
-        echo "     lsof -ti:9000 | xargs kill"
-        echo "     kubectl port-forward svc/minio 9000:9000"
-    else
-        echo -n "  Starting port forward for MinIO on port 9000... "
-        kubectl port-forward svc/minio 9000:9000 > /tmp/minio-port-forward.log 2>&1 &
-        MINIO_PID=$!
-        sleep 3
-        if kill -0 $MINIO_PID 2>/dev/null && check_port 9000; then
-            echo -e "${GREEN}✓${NC} (PID: $MINIO_PID)"
-        else
-            echo -e "${YELLOW}⚠️  Failed to start (check logs: /tmp/minio-port-forward.log)${NC}"
-        fi
-    fi
-else
-    echo -e "  ${YELLOW}⚠️  MinIO service not found. Skipping...${NC}"
-fi
-
-echo ""
 echo -e "${BLUE}Note: Upload/Download Service${NC}"
 echo "  Upload/Download Service is accessed through the API Gateway (port 8080)"
 echo "  No direct port-forward needed - use: http://localhost:8080/api/uploads"
@@ -569,7 +570,7 @@ echo ""
 echo -e "${BLUE}Security Architecture:${NC}"
 echo "  ✓ All API requests go through API Gateway (authentication, rate limiting)"
 echo "  ✓ Authorization happens BEFORE presigned URL generation"
-echo "  ✓ MinIO port-forward is REQUIRED for presigned URLs (clients need direct access)"
+echo "  ✓ MinIO ingress is configured for presigned URLs (clients access via http://minio.localhost)"
 echo "  ✓ Presigned URLs are time-limited (1 hour) and part-specific (secure)"
 echo ""
 echo "───────────────────────────────────────────────────────────────"
@@ -580,7 +581,7 @@ echo "Access the following services:"
 echo ""
 echo "  🌐 Frontend:     http://localhost:5173 (or via ingress)"
 echo "  🔌 API Gateway:  http://localhost:8080 (or via ingress: http://api.localhost)"
-echo "  📦 MinIO:        http://localhost:9000 (port-forward) or http://minio.localhost (ingress)"
+echo "  📦 MinIO:        http://minio.localhost (API) or http://minio-console.localhost (Console)"
 echo "  📤 Upload/Download: Via API Gateway at http://localhost:8080/api/uploads"
 echo "  📊 Grafana:      http://localhost:3000 (admin/admin)"
 echo "  📈 Prometheus:   http://localhost:9090"
@@ -596,7 +597,6 @@ echo ""
 echo "To stop individual services:"
 echo "  lsof -ti:5173 | xargs kill  # Frontend"
 echo "  lsof -ti:8080 | xargs kill  # API Gateway"
-echo "  lsof -ti:9000 | xargs kill  # MinIO"
 echo "  lsof -ti:3000 | xargs kill  # Grafana"
 echo "  lsof -ti:9090 | xargs kill  # Prometheus"
 echo "  lsof -ti:16686 | xargs kill # Jaeger"

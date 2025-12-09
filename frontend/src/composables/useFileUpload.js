@@ -1,7 +1,6 @@
 import { ref } from 'vue'
 import { models as modelsApi, uploads as uploadsApi } from '../services/api'
 
-// Simple SHA-256 hash function using Web Crypto API
 async function calculateSHA256(file) {
   const arrayBuffer = await file.arrayBuffer()
   const hashBuffer = await crypto.subtle.digest('SHA-256', arrayBuffer)
@@ -44,11 +43,9 @@ export function useFileUpload() {
       uploadError.value = null
       abortController.value = new AbortController()
 
-      // Step 1: Calculate file hash
       uploadProgress.value = 5
       const fileHash = await calculateSHA256(file)
       
-      // Step 2: Create model if modelId not provided
       if (!modelId) {
         uploadProgress.value = 10
         const model = await modelsApi.create({
@@ -58,9 +55,8 @@ export function useFileUpload() {
         modelId = model.id
       }
 
-      // Step 3: Initiate upload session
       uploadProgress.value = 20
-      const chunkSize = 5 * 1024 * 1024 // 5MB chunks
+      const chunkSize = 5 * 1024 * 1024 
       const uploadInit = await uploadsApi.initiateUpload({
         filename: file.name,
         file_size: file.size,
@@ -72,16 +68,12 @@ export function useFileUpload() {
 
       currentUploadId.value = uploadInit.upload_id
 
-      // Step 4: Upload chunks to presigned URLs
-      // presigned_urls is an array of { part_number, url, expires_at }
       const totalChunks = uploadInit.presigned_urls.length
       const uploadedParts = []
 
-      // Sort presigned URLs by part_number to ensure correct order
       const sortedUrls = [...uploadInit.presigned_urls].sort((a, b) => a.part_number - b.part_number)
 
       for (let i = 0; i < totalChunks; i++) {
-        // Check if upload was aborted
         if (abortController.value?.signal.aborted) {
           throw new Error('Upload cancelled')
         }
@@ -90,14 +82,10 @@ export function useFileUpload() {
         const partNumber = presignedUrlData.part_number
         const presignedUrl = presignedUrlData.url
         
-        // Note: Presigned URLs should now be generated with public_endpoint (localhost:9000)
-        // No need to replace hostname anymore - backend handles this
-        
         const start = (partNumber - 1) * chunkSize
         const end = Math.min(start + chunkSize, file.size)
         const chunk = file.slice(start, end)
 
-        // Upload chunk directly to MinIO (bypasses backend)
         const response = await fetch(presignedUrl, {
           method: 'PUT',
           body: chunk,
@@ -112,7 +100,6 @@ export function useFileUpload() {
           throw new Error(`Failed to upload chunk ${partNumber}: ${response.status} ${errorText}`)
         }
 
-        // Get ETag from response headers (required for multipart completion)
         const etag = response.headers.get('ETag') || response.headers.get('etag') || ''
         if (!etag) {
           throw new Error(`Missing ETag for chunk ${partNumber}`)
@@ -120,19 +107,16 @@ export function useFileUpload() {
         
         uploadedParts.push({
           part_number: partNumber,
-          etag: etag.replace(/"/g, '') // Remove quotes from ETag
+          etag: etag.replace(/"/g, '') 
         })
 
-        // Update progress
         uploadProgress.value = 20 + (70 * (i + 1) / totalChunks)
       }
 
-      // Check if upload was aborted before completing
       if (abortController.value?.signal.aborted) {
         throw new Error('Upload cancelled')
       }
 
-      // Step 5: Complete upload
       uploadProgress.value = 90
       const result = await uploadsApi.completeUpload(uploadInit.upload_id, uploadedParts)
       
@@ -150,7 +134,6 @@ export function useFileUpload() {
       console.error('Upload error:', error)
       uploadError.value = error.message || 'Upload failed'
       
-      // Abort the upload on the backend if we have an upload ID
       if (currentUploadId.value && !abortController.value?.signal.aborted) {
         try {
           await uploadsApi.abortUpload(currentUploadId.value)
@@ -175,4 +158,3 @@ export function useFileUpload() {
     abortUpload
   }
 }
-

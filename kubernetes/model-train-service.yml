@@ -68,11 +68,11 @@ spec:
               value: "mymaster"
           resources:
             requests:
-              cpu: "200m"          # Training is CPU-intensive
-              memory: "512Mi"      # PyTorch models need memory
+              cpu: "200m"          
+              memory: "512Mi"      
             limits:
-              cpu: "2000m"         # Allow burst for training
-              memory: "2Gi"        # Large models may need more
+              cpu: "2000m"         
+              memory: "2Gi"        
           readinessProbe:
             httpGet:
               path: /health

@@ -57,11 +57,11 @@ spec:
               value: "admin_password"
           resources:
             requests:
-              cpu: "500m"          # Increased from 200m to prevent CPU saturation
-              memory: "256Mi"      # Increased from 160Mi
+              cpu: "500m"          
+              memory: "256Mi"     
             limits:
-              cpu: "2000m"         # Increased from 1000m (2 cores) to handle serialization/ORM overhead
-              memory: "512Mi"      # Increased from 320Mi
+              cpu: "2000m"        
+              memory: "512Mi"     
           readinessProbe:
             httpGet:
               path: /health

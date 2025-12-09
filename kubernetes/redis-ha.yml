@@ -207,8 +207,8 @@ spec:
               mountPath: /data
           resources:
             requests:
-              cpu: "50m"  # INCREASED from 25m to meet cluster minimum requirements
-              memory: "64Mi"  # INCREASED from 32Mi to meet cluster minimum requirements
+              cpu: "50m"  
+              memory: "64Mi"  
             limits:
               cpu: "100m"
               memory: "64Mi"

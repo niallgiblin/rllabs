@@ -1,11 +1,8 @@
 // API service for backend communication
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8080'
 
-// Development mode: if true, API failures return empty data instead of throwing errors
-// This allows frontend development when API Gateway is unavailable
-const DEV_MODE_GRACEFUL_FAIL = import.meta.env.VITE_DEV_MODE_GRACEFUL_FAIL !== 'false' // Default to true
+const DEV_MODE_GRACEFUL_FAIL = import.meta.env.VITE_DEV_MODE_GRACEFUL_FAIL !== 'false' 
 
-// Token management
 const TOKEN_KEY = 'rllabs_auth_token'
 
 export const auth = {
@@ -30,7 +27,6 @@ export const auth = {
   }
 }
 
-// API client with error handling and fault tolerance
 export async function apiRequest(endpoint, options = {}) {
   const url = `${API_BASE_URL}${endpoint}`
   const token = auth.getToken()
@@ -40,15 +36,12 @@ export async function apiRequest(endpoint, options = {}) {
     ...options.headers
   }
   
-  // Only add Authorization header if token exists
-  // Gateway handles public endpoints correctly even with token present
   if (token) {
     headers['Authorization'] = `Bearer ${token}`
   }
   
-  // Retry configuration for transient failures
   const maxRetries = 3
-  const retryDelay = 1000 // Start with 1 second
+  const retryDelay = 1000 
   
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
@@ -64,19 +57,15 @@ export async function apiRequest(endpoint, options = {}) {
           detail: `HTTP ${response.status}: ${response.statusText}`
         }))
         
-        // Don't retry on client errors (4xx) except 429 (rate limit)
         if (response.status >= 400 && response.status < 500 && response.status !== 429) {
           if (response.status === 401) {
-            // Unauthorized - clear token and redirect to login
             auth.logout()
             throw new Error('Authentication required. Please sign in again.')
           }
-          // Extract error message - try detail first (FastAPI format), then error_description, then error
           const errorMessage = errorData.detail || errorData.error_description || errorData.error || `Request failed (${response.status})`
           throw new Error(errorMessage)
         }
         
-        // Retry on rate limit (429) or server errors (5xx)
         if (response.status === 429 || response.status >= 500) {
           if (attempt < maxRetries - 1) {
             const retryAfter = response.headers.get('Retry-After')
@@ -89,21 +78,18 @@ export async function apiRequest(endpoint, options = {}) {
         throw new Error(errorData.error_description || errorData.error || 'Request failed')
       }
       
-      // Handle 204 No Content
       if (response.status === 204) {
         return null
       }
       
       return await response.json()
     } catch (error) {
-      // Network errors - retry with exponential backoff
       if (error instanceof TypeError && error.message.includes('fetch')) {
         if (attempt < maxRetries - 1) {
           const delay = retryDelay * Math.pow(2, attempt)
           await new Promise(resolve => setTimeout(resolve, delay))
           continue
         }
-        // In dev mode, return null for network errors instead of throwing
         if (DEV_MODE_GRACEFUL_FAIL) {
           console.warn(`[DEV MODE] API unavailable: ${endpoint} - returning null`)
           return null
@@ -111,12 +97,10 @@ export async function apiRequest(endpoint, options = {}) {
         throw new Error('Network error: Unable to connect to the server. Please check your connection.')
       }
       
-      // Re-throw non-network errors (don't retry)
       throw error
     }
   }
   
-  // Should never reach here, but TypeScript/ESLint might complain
   if (DEV_MODE_GRACEFUL_FAIL) {
     console.warn(`[DEV MODE] API request failed after retries: ${endpoint} - returning null`)
     return null
@@ -128,7 +112,6 @@ export async function apiRequest(endpoint, options = {}) {
 export const models = {
   async list(page = 1, pageSize = 50) {
     const response = await apiRequest(`/api/models?page=${page}&page_size=${pageSize}`)
-    // Handle both old format (array) and new format (paginated) for backward compatibility
     if (Array.isArray(response)) {
       return {
         items: response,
@@ -138,7 +121,6 @@ export const models = {
         total_pages: 1
       }
     }
-    // New paginated format
     return response
   },
   
@@ -243,7 +225,6 @@ export const authApi = {
   }
 }
 
-// Export individual services for modular imports
 export default {
   auth,
   authApi,
@@ -251,6 +232,5 @@ export default {
   uploads,
   downloads,
   health,
-  apiRequest // Export for use in other service modules
+  apiRequest 
 }
-

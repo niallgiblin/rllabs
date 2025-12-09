@@ -23,13 +23,11 @@ class EventPublisher:
     
     def _ensure_connection(self):
         """Ensure RabbitMQ connection is established"""
-        # Check if connection is closed (handle pika internal errors)
         connection_closed = False
         if self._connection is not None:
             try:
                 connection_closed = self._connection.is_closed
             except (IndexError, AttributeError) as e:
-                # Handle pika internal deque errors
                 logger.debug(f"Pika connection state check error (likely deque issue): {e}")
                 connection_closed = True
             except Exception as e:
@@ -37,13 +35,11 @@ class EventPublisher:
                 connection_closed = True
         
         if self._connection is None or connection_closed:
-            # Clean up old connection state safely
             if self._connection is not None:
                 try:
                     if not self._connection.is_closed:
                         self._connection.close()
                 except (IndexError, AttributeError):
-                    # Ignore pika internal deque errors during cleanup
                     pass
                 except Exception:
                     pass
@@ -56,14 +52,13 @@ class EventPublisher:
                     credentials=credentials,
                     heartbeat=600,
                     blocked_connection_timeout=300,
-                    connection_attempts=3,  # Retry up to 3 times
-                    retry_delay=1,  # 1 second between retries
-                    socket_timeout=5  # 5 second timeout per attempt
+                    connection_attempts=3,  
+                    retry_delay=1,  
+                    socket_timeout=5  
                 )
                 self._connection = pika.BlockingConnection(parameters)
                 self._channel = self._connection.channel()
                 
-                # Declare exchange for model events
                 self._channel.exchange_declare(
                     exchange='model_events',
                     exchange_type='topic',
@@ -71,7 +66,7 @@ class EventPublisher:
                 )
                 logger.info("Connected to RabbitMQ")
             except Exception as e:
-                logger.debug(f"Failed to connect to RabbitMQ: {e}")  # Changed to debug to reduce log noise
+                logger.debug(f"Failed to connect to RabbitMQ: {e}")  
                 self._connection = None
                 self._channel = None
     
@@ -87,7 +82,7 @@ class EventPublisher:
             "event_type": "ModelDeleted",
             "model_id": model_id,
             "model_name": model_name,
-            "timestamp": None  # Will be set by consumer if needed
+            "timestamp": None  
         }
         self._publish_event("model.deleted", event)
     
@@ -163,12 +158,10 @@ class EventPublisher:
                     self._connection.close()
                     logger.info("Closed RabbitMQ connection")
             except (IndexError, AttributeError) as e:
-                # Handle pika internal deque errors during cleanup
                 logger.debug(f"Ignoring pika cleanup error (likely deque issue): {e}")
             except Exception as e:
                 logger.debug(f"Error closing connection: {e}")
 
-# Global event publisher instance
 _event_publisher = None
 
 def get_event_publisher() -> EventPublisher:
@@ -183,4 +176,3 @@ def get_event_publisher() -> EventPublisher:
             password=os.getenv("RABBITMQ_PASS", "admin_password")
         )
     return _event_publisher
-

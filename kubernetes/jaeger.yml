@@ -1,9 +1,9 @@
 # Jaeger All-in-One Deployment
 # =============================
 # Distributed tracing backend that receives spans from services
-# and provides a UI for visualizing request flows.
+# and provides a UI for visualising request flows.
 #
-# Components (all-in-one for development):
+# Components:
 # - Collector: Receives spans via OTLP (OpenTelemetry Protocol)
 # - Query: Serves the UI and query API
 # - In-memory storage: For development (use Elasticsearch/Cassandra in production)
@@ -34,40 +34,31 @@ spec:
         - name: jaeger
           image: jaegertracing/all-in-one:1.52
           env:
-            # Enable OTLP receivers (OpenTelemetry Protocol)
             - name: COLLECTOR_OTLP_ENABLED
               value: "true"
-            # In-memory storage (for development)
             - name: SPAN_STORAGE_TYPE
               value: "memory"
-            # Limit memory usage
             - name: MEMORY_MAX_TRACES
               value: "50000"
           ports:
-            # OTLP gRPC receiver (primary - used by OpenTelemetry SDK)
             - name: otlp-grpc
               containerPort: 4317
               protocol: TCP
-            # OTLP HTTP receiver (alternative)
             - name: otlp-http
               containerPort: 4318
               protocol: TCP
-            # Jaeger UI and Query API
             - name: query
               containerPort: 16686
               protocol: TCP
-            # Jaeger Thrift (legacy, for older clients)
             - name: thrift-compact
               containerPort: 6831
               protocol: UDP
             - name: thrift-binary
               containerPort: 6832
               protocol: UDP
-            # Jaeger gRPC (legacy)
             - name: jaeger-grpc
               containerPort: 14250
               protocol: TCP
-            # Admin/health port
             - name: admin
               containerPort: 14269
               protocol: TCP
@@ -102,17 +93,14 @@ spec:
   selector:
     app: jaeger
   ports:
-    # OTLP gRPC (primary - OpenTelemetry SDK uses this)
     - name: otlp-grpc
       port: 4317
       targetPort: 4317
       protocol: TCP
-    # OTLP HTTP (alternative)
     - name: otlp-http
       port: 4318
       targetPort: 4318
       protocol: TCP
-    # Legacy Jaeger ports (for backward compatibility)
     - name: thrift-compact
       port: 6831
       targetPort: 6831
@@ -127,7 +115,6 @@ spec:
       protocol: TCP
   type: ClusterIP
 ---
-# Separate service for Jaeger Query UI
 apiVersion: v1
 kind: Service
 metadata:

@@ -4,24 +4,19 @@ API Gateway - Main Application
 Central entry point for all API requests with authentication, rate limiting, and routing.
 """
 
-# =============================================================================
-# OBSERVABILITY SETUP (must be first, before other imports)
-# =============================================================================
+# Observability Setup
 import os
 import sys
 
-# Add shared module to path
-shared_path = os.path.join(os.path.dirname(__file__), 'shared')
+shared_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'shared'))
 if os.path.exists(shared_path) and shared_path not in sys.path:
     sys.path.insert(0, shared_path)
 
 SERVICE_NAME = os.getenv("OTEL_SERVICE_NAME", "api-gateway")
 
-# Initialize structured logging and tracing
 try:
     from observability import setup_logging, setup_tracing, get_logger
     
-    # Use JSON logging in Kubernetes
     json_output = os.getenv("KUBERNETES_SERVICE_HOST") is not None
     setup_logging(service_name=SERVICE_NAME, json_output=json_output)
     setup_tracing(service_name=SERVICE_NAME)
@@ -32,9 +27,8 @@ except ImportError:
     logger = logging.getLogger(__name__)
     logger.warning("Observability module not available, using basic logging")
 
-# =============================================================================
-# APPLICATION IMPORTS
-# =============================================================================
+
+
 from fastapi import FastAPI, Request, HTTPException, status, Depends, APIRouter
 from fastapi.responses import Response, RedirectResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -46,11 +40,9 @@ import logging
 from typing import Dict, Any, Optional
 from contextlib import asynccontextmanager
 
-# Try to import optional dependencies with fallbacks
 try:
     from config import settings
 except ImportError:
-    # Fallback settings
     class Settings:
         GATEWAY_URL = "http://localhost:8080"
         ALLOWED_ORIGINS = [
@@ -67,37 +59,29 @@ except ImportError:
 try:
     from rate_limiter import check_rate_limit, RateLimitExceeded
 except ImportError:
-    # Fallback rate limiter
     class RateLimitExceeded(Exception):
         def __init__(self, retry_after: int = 60):
             self.retry_after = retry_after
             super().__init__(f"Rate limit exceeded. Try again in {retry_after} seconds")
     
     def check_rate_limit(user_id: str, endpoint: str, method: str = "GET"):
-        # Basic no-op rate limiter for development
         pass
 
 try:
     from proxy import proxy_request, get_target_service, ServiceUnavailableError
 except (ImportError, Exception) as e:
-    # Fallback proxy
     class ServiceUnavailableError(Exception):
         def __init__(self, service_name: str):
             self.service_name = service_name
             super().__init__(f"Service unavailable: {service_name}")
     
     async def proxy_request(request: Request, target_service: str, user_id: str = None, extra_headers: dict = None):
-        # Fallback response
         return JSONResponse(
             content={"error": "Proxy service not configured", "service": target_service},
             status_code=503
         )
     
     def get_target_service(path: str) -> Optional[str]:
-        # Fallback routing logic - should match config.py SERVICES dict
-        # This is used only if proxy import fails
-        # Check more specific routes first
-        # Special case: model comments go to collaboration service
         if "/comments" in path and path.startswith("/api/models/"):
             return "http://collaboration-service:8000"
         elif path.startswith("/api/versions"):
@@ -113,14 +97,12 @@ except (ImportError, Exception) as e:
         elif path.startswith("/api/training-jobs"):
             return "http://upload-download-service:8002" 
 
-# Placeholder for internal router if no mtls
 internal_router = APIRouter()
 
 @internal_router.get("/health")
 async def internal_health():
     return {"status": "internal service healthy"}
 
-# Application Lifespan
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan events"""
@@ -130,12 +112,10 @@ async def lifespan(app: FastAPI):
     
     yield
     
-    # Cleanup: close shared HTTP client connection pool
     from proxy import close_http_client
     await close_http_client()
     logger.info("HTTP client pool closed")
     
-    # Cleanup: close Redis client
     try:
         from rate_limiter import close_redis_client
         await close_redis_client()
@@ -145,7 +125,7 @@ async def lifespan(app: FastAPI):
     
     logger.info("API Gateway shutting down...")
 
-# FastAPI App
+
 app = FastAPI(
     title="API Gateway", 
     version="1.0.0",
@@ -153,13 +133,11 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# Register health endpoint BEFORE Instrumentator so it can be excluded
 @app.get("/health", include_in_schema=False)
 async def health():
     """Lightweight health check for Kubernetes probes"""
     return {"status": "ok"}
 
-# Add Prometheus metrics
 try:
     from prometheus_fastapi_instrumentator import Instrumentator
     instrumentator = Instrumentator()
@@ -168,11 +146,9 @@ try:
 except ImportError:
     logger.warning("prometheus-fastapi-instrumentator not available - metrics disabled")
 
-# Include routers
 app.include_router(internal_router, prefix="/internal", tags=["internal"])
 
 
-# Try to mount static files
 try:
     app.mount("/static", StaticFiles(directory="static"), name="static")
     templates = Jinja2Templates(directory="templates")
@@ -180,7 +156,6 @@ except Exception:
     logger.warning("Static files or templates not available - running in minimal mode")
     templates = None
 
-# CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.ALLOWED_ORIGINS,
@@ -189,37 +164,29 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Custom Middleware
 @app.middleware("http")
 async def add_security_headers(request: Request, call_next):
     """Add security headers to all responses with request timeout"""
     start_time = time.time()
     
-    # Dynamic timeout based on endpoint type
-    # Downloads and uploads need more time (MinIO operations)
-    # Health checks and metrics should be fast
     path = request.url.path
     if path in ["/health", "/internal/health"]:
-        timeout = 1.0  # Health checks should be fast
+        timeout = 1.0  
     elif path == "/metrics":
-        timeout = 5.0  # Metrics can take longer (Prometheus scraping)
+        timeout = 5.0  
     elif path.startswith("/api/uploads") and request.method == "POST":
-        # Separate timeouts for upload operations
         if "/complete" in path:
-            timeout = 60.0  # Complete operations need more time (multipart finalization)
+            timeout = 60.0  
         else:
-            timeout = 45.0  # Initiate upload (presigned URL generation)
+            timeout = 45.0  
     elif "/downloads/" in path:
-        timeout = 30.0  # Downloads should be fast (presigned URL only)
+        timeout = 30.0  
     elif "/training-jobs" in path:
-        timeout = 15.0  # Reduced: job should queue quickly, not wait for validation
+        timeout = 15.0  
     elif path.startswith("/api/models") and request.method == "GET":
-        # Model catalog endpoints need more time for database queries and serialization
-        # GET /api/models (list): 30s for large datasets
-        # GET /api/models/{id}: 30s (covers individual model, versions, latest endpoints)
-        timeout = 30.0  # Increased from 10.0s - allows time for slow queries with many models/versions
+        timeout = 30.0  
     else:
-        timeout = 10.0  # Default: 10 seconds
+        timeout = 10.0 
     
     try:
         response = await asyncio.wait_for(
@@ -233,23 +200,19 @@ async def add_security_headers(request: Request, call_next):
             content={"error": "Request timeout", "detail": f"Request took longer than {timeout} seconds"}
         )
     
-    # Security headers
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-XSS-Protection"] = "1; mode=block"
     response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     
-    # Performance monitoring
     process_time = time.time() - start_time
     response.headers["X-Process-Time"] = str(process_time)
     
-    # Log request (only if slow, exclude health/metrics to reduce noise)
     if process_time > 0.5 and request.url.path not in ["/health", "/metrics", "/internal/health"]:
         logger.info(f"{request.method} {request.url.path} - {response.status_code} - {process_time:.3f}s")
     
     return response
 
-# Error Handlers
 @app.exception_handler(RateLimitExceeded)
 async def rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded):
     """Handle rate limit exceeded errors"""
@@ -286,12 +249,9 @@ async def http_exception_handler(request: Request, exc: HTTPException):
         }
     )
 
-# Protected Route Proxy
 from jwt_auth import get_current_user, bearer_scheme, create_access_token
 from fastapi.security import HTTPAuthorizationCredentials
 
-# User management (simple file-based store for development)
-# In production, this would be a database or separate user service
 import hashlib
 import json
 from pathlib import Path
@@ -325,16 +285,13 @@ def create_user(username: str, email: str, password: str, is_admin: bool = False
     """Create a new user"""
     users = _load_users()
     
-    # Check if user already exists
     if username in users:
         raise ValueError("Username already exists")
     
-    # Check if email already exists
     for user in users.values():
         if user.get('email') == email:
             raise ValueError("Email already exists")
     
-    # Create user
     user = {
         'username': username,
         'email': email,
@@ -375,11 +332,10 @@ def get_user(username: str) -> Optional[Dict]:
     users = _load_users()
     if username in users:
         user = users[username].copy()
-        user.pop('password_hash', None)  # Don't return password hash
+        user.pop('password_hash', None) 
         return user
     return None
 
-# Authentication endpoints (for development)
 from pydantic import BaseModel, EmailStr
 
 class RegisterRequest(BaseModel):
@@ -403,7 +359,6 @@ async def register(request: RegisterRequest):
             is_admin=request.is_admin
         )
         
-        # Generate JWT token
         scopes = ["api:read", "api:write"]
         if request.is_admin:
             scopes.append("api:admin")
@@ -436,7 +391,6 @@ async def login(request: LoginRequest):
             headers={"WWW-Authenticate": "Bearer"},
         )
     
-    # Generate JWT token
     scopes = ["api:read", "api:write"]
     if user.get('is_admin'):
         scopes.append("api:admin")
@@ -512,23 +466,16 @@ async def proxy_to_service(
     """
     full_path = f"/api/{path}"
     
-    # Determine if this endpoint requires authentication
     requires_auth = False
     if request.method in ["POST", "PUT", "DELETE", "PATCH"]:
-        # All write operations require auth
         requires_auth = True
     elif path.startswith("uploads"):
-        # Upload endpoints always require auth
         requires_auth = True
     elif path.startswith("downloads") and request.method == "DELETE":
-        # Delete operations on downloads require auth
         requires_auth = True
     elif path.startswith("models/") and "/ownership" in path:
-        # Ownership endpoint requires auth even for GET
         requires_auth = True
-    # GET /api/models* and GET /api/downloads* are public (no auth required)
     
-    # Check authentication if required
     if requires_auth:
         if current_user is None:
             raise HTTPException(
@@ -541,8 +488,6 @@ async def proxy_to_service(
         scopes = current_user.get("scopes", [])
         scope = " ".join(scopes) if isinstance(scopes, list) else str(scopes)
     else:
-        # Public endpoint - but still extract user_id if JWT is provided (for X-User-Id forwarding)
-        # This allows endpoints like /ownership to work even if not explicitly requiring auth
         if current_user is not None:
             user_id = current_user.get("user_id", None)
         else:
@@ -551,36 +496,24 @@ async def proxy_to_service(
         scopes = []
         scope = ""
     
-    # Check rate limit (by user_id if authenticated, by IP if not)
-    # Async rate limiter with timeout to prevent Redis from blocking request processing
-    # Use full path for more granular rate limiting (per-endpoint instead of per-service)
-    # This prevents one endpoint from affecting others and allows better load distribution
-    endpoint = full_path  # Use full path for better granularity
+    endpoint = full_path  
     rate_limit_key = user_id if user_id else f"ip:{client_id}"
     try:
-        # Async rate limiter with timeout - fail open if Redis slow
         await asyncio.wait_for(
             check_rate_limit(rate_limit_key, endpoint),
-            timeout=0.05  # 50ms max - reduced since async is faster
+            timeout=0.05  
         )
     except asyncio.TimeoutError:
-        # Only log at debug level (reduce production noise)
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(f"Rate limiter timeout for {rate_limit_key} - allowing request")
-        # Fail open: allow request to proceed
     except RateLimitExceeded:
-        # Re-raise rate limit exceptions (these should return 429)
         raise
     except Exception as e:
-        # Only log at debug level (reduce production noise)
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(f"Rate limiter error (allowing request): {e}")
-        # Continue processing - rate limiter has fail-open semantics
     
-    # Determine target service (only log errors to reduce noise)
     try:
         target_service = get_target_service(full_path)
-        # Only log routing at debug level (too verbose for production)
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(f"[ROUTING] Service lookup for '{full_path}': {target_service}")
     except Exception as e:
@@ -595,8 +528,6 @@ async def proxy_to_service(
             detail="Service not found"
         )
     
-    # Log request with auth status for monitoring (only if slow or error)
-    # Reduced verbosity: only log at debug level for normal requests
     if logger.isEnabledFor(logging.DEBUG):
         auth_status = "authenticated" if user_id else "anonymous"
         auth_status_detail = f"User {user_id}" if user_id else f"Anonymous (IP: {client_id})"
@@ -605,14 +536,12 @@ async def proxy_to_service(
         )
     
     try:
-        # Prepare headers
         extra_headers = {
             'X-Client-ID': client_id,
             'X-Forwarded-For': request.headers.get('X-Forwarded-For', ''),
             'X-Real-IP': request.client.host if request.client else ''
         }
         
-        # Add user context if authenticated
         if user_id:
             from jwt_auth import is_admin
             is_admin_user = is_admin(scopes)
@@ -623,7 +552,6 @@ async def proxy_to_service(
                 'X-Is-Admin': 'true' if is_admin_user else 'false',
             })
         
-        # Proxy request
         response = await proxy_request(
             request=request,
             target_service=target_service,
@@ -631,7 +559,6 @@ async def proxy_to_service(
             extra_headers=extra_headers
         )
         
-        # Log 5xx responses for debugging
         if response.status_code >= 500:
             logger.error(
                 f"Backend {target_service} returned {response.status_code} for {request.method} {full_path}",
@@ -644,7 +571,6 @@ async def proxy_to_service(
                 }
             )
         
-        # Return response
         content_bytes = getattr(response, "content", None)
         if content_bytes is None:
             content_bytes = getattr(response, "body", b"")
@@ -665,7 +591,6 @@ async def proxy_to_service(
         )
 
 
-# Public Route Proxy
 @app.api_route(
     "/public/{path:path}",
     methods=["GET", "OPTIONS", "HEAD"]
@@ -684,25 +609,18 @@ async def public_proxy(request: Request, path: str):
             detail="Service not found"
         )
     
-    # Check rate limit for public endpoints by IP
-    # Async rate limiter with timeout to prevent Redis from blocking request processing
     client_ip = request.client.host if request.client else "unknown"
     try:
-        # Async rate limiter with timeout - fail open if Redis slow
         await asyncio.wait_for(
             check_rate_limit(f"ip:{client_ip}", f"/public/{path}"),
-            timeout=0.05  # 50ms max - reduced since async is faster
+            timeout=0.05  
         )
     except asyncio.TimeoutError:
         logger.debug(f"Rate limiter timeout for ip:{client_ip} - allowing request")
-        # Fail open: allow request to proceed
     except RateLimitExceeded:
-        # Re-raise rate limit exceptions (these should return 429)
         raise
     except Exception as e:
-        # Log but don't block requests on Redis errors - fail open
         logger.debug(f"Rate limiter error (allowing request): {e}")
-        # Continue processing - rate limiter has fail-open semantics
     
     logger.info(f"Public request from {client_ip} -> {request.method} {full_path} -> {target_service}")
     

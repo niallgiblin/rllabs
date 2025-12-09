@@ -267,7 +267,6 @@ Complete high-availability with full replication:
 kubectl apply -f kubernetes/postgres-ha.yml
 kubectl apply -f kubernetes/redis-ha.yml
 kubectl apply -f kubernetes/rabbitmq-ha.yml
-kubectl apply -f kubernetes/minio-ha.yml
 kubectl apply -f kubernetes/mongodb.yml  # Already HA
 
 # Deploy application services

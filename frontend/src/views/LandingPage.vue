@@ -407,21 +407,17 @@ const searchQuery = ref('')
 const selectedFilter = ref('all')
 const sortBy = ref('newest')
 
-// Fetch models from API - fetch all pages if needed
 const fetchModels = async (page = 1, pageSize = 200) => {
   try {
     loading.value = true
     error.value = null
     
-    // Fetch first page
     let response = await modelsApi.list(page, pageSize)
     let allModels = []
     
-    // Handle paginated response
     if (response.items && Array.isArray(response.items)) {
       allModels = [...response.items]
       
-      // If there are more pages, fetch them all
       const totalPages = response.total_pages || 1
       if (totalPages > 1) {
         for (let p = 2; p <= totalPages; p++) {
@@ -432,16 +428,13 @@ const fetchModels = async (page = 1, pageSize = 200) => {
             }
           } catch (err) {
             console.warn(`Failed to fetch page ${p}:`, err)
-            // Continue with what we have
             break
           }
         }
       }
     } else if (Array.isArray(response)) {
-      // Legacy format - direct array
       allModels = response
     } else {
-      // Handle case where API is unavailable (dev mode graceful failure)
       models.value = []
       loading.value = false
       return
@@ -449,7 +442,6 @@ const fetchModels = async (page = 1, pageSize = 200) => {
     
     const data = allModels
     
-    // Check ownership for each model if authenticated
     const modelsWithOwnership = await Promise.all(
       data.map(async (model) => {
         let isOwner = false
@@ -468,13 +460,12 @@ const fetchModels = async (page = 1, pageSize = 200) => {
       })
     )
     
-    // Transform API response to match component expectations
     models.value = modelsWithOwnership.map(model => ({
       id: model.id,
       name: model.name,
-      type: 'policy-gradient', // Default type - you might want to add this to the backend
+      type: 'policy-gradient',
       description: model.description || 'No description available',
-      downloads: model.versions?.length || 0, // Use version count as download proxy
+      downloads: model.versions?.length || 0, 
       author: model.created_by || 'unknown',
       isOwner: model.isOwner
     }))
@@ -538,7 +529,6 @@ const handleFileSelect = (event) => {
   if (file) {
     selectedFile.value = file
     if (!uploadModelName.value) {
-      // Auto-fill model name from filename
       uploadModelName.value = file.name.replace(/\.[^/.]+$/, '')
     }
   }
@@ -583,15 +573,12 @@ const handleDeleteModel = async (modelId) => {
   try {
     deletingModelId.value = modelId
     await modelsApi.delete(modelId)
-    // Remove from local list
     models.value = models.value.filter(m => m.id !== modelId)
-    // Show success message (could be replaced with toast notification)
     console.log('Model deleted successfully')
   } catch (error) {
     console.error('Failed to delete model:', error)
     const errorMessage = error.message || 'Unknown error'
     alert(`Failed to delete model: ${errorMessage}`)
-    // Re-fetch models to ensure UI is in sync
     await fetchModels()
   } finally {
     deletingModelId.value = null
@@ -610,17 +597,12 @@ const handleUpload = async () => {
       uploadDescription.value
     )
     
-    // Success - refresh models and close modal
     await fetchModels()
     cancelUpload()
     
-    // Show success message (could be replaced with toast notification)
     console.log('Model uploaded successfully!')
   } catch (error) {
-    // Error is already set in uploadError by useFileUpload
     console.error('Upload failed:', error)
-    // The error message should already be in uploadError from useFileUpload
-    // But ensure it's displayed
     if (!uploadError.value && error.message) {
       uploadError.value = error.message || 'Upload failed. Please try again.'
     }
@@ -631,11 +613,9 @@ onMounted(() => {
   fetchModels()
 })
 
-// Filtered and sorted models
 const filteredModels = computed(() => {
   let result = [...models.value]
   
-  // Apply search filter
   if (searchQuery.value) {
     const query = searchQuery.value.toLowerCase()
     result = result.filter(model => 
@@ -644,14 +624,11 @@ const filteredModels = computed(() => {
     )
   }
   
-  // Apply type filter
   if (selectedFilter.value !== 'all') {
     result = result.filter(model => model.type === selectedFilter.value)
   }
   
-  // Apply sorting
   if (sortBy.value === 'newest') {
-    // Models are already in creation order from API
     result = [...result].reverse()
   } else if (sortBy.value === 'downloads') {
     result.sort((a, b) => b.downloads - a.downloads)
@@ -660,4 +637,3 @@ const filteredModels = computed(() => {
   return result
 })
 </script>
-

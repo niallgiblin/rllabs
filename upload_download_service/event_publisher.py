@@ -5,8 +5,9 @@ Event Publisher for Upload/Download Service
 Publishes lifecycle events to RabbitMQ for other services to consume.
 
 Events Published:
-1. artifact.uploaded - When an artifact upload completes
-2. artifact.downloaded - When an artifact is downloaded (audit trail)
+1. artifact.uploaded - When an artifact upload completes (general notification)
+2. artifact.committed - When an artifact upload completes (for Model Catalog auto-registration)
+3. artifact.downloaded - When an artifact is downloaded (audit trail)
 
 Pattern: Best-Effort Delivery
 - If RabbitMQ is down, operations still succeed
@@ -167,7 +168,48 @@ class EventPublisher:
             "timestamp": datetime.now(timezone.utc).isoformat() + "Z" # timestamp
         }
         
-        self._publish_event("artifact.downloaded", event) 
+        self._publish_event("artifact.downloaded", event)
+    
+    def publish_artifact_committed(
+        self,
+        artifact_id: str,  # Content hash (sha256:...)
+        model_id: Optional[int],  # Parent model ID (None if not a model artifact)
+        storage_path: str,  # S3 storage path
+        content_hash: str,  # Content hash (same as artifact_id, for consistency)
+        uploaded_by: str,  # User ID who uploaded
+        file_size: int,  # File size in bytes
+        filename: str  # Original filename
+    ):
+        """
+        Publish ArtifactCommitted event
+        
+        This event is consumed by Model Catalog Service to auto-register model versions.
+        Published when an artifact upload completes successfully.
+        
+        Args:
+            artifact_id: Content hash (sha256:...)
+            model_id: Parent model ID (None if not a model artifact)
+            storage_path: S3 storage path where artifact is stored
+            content_hash: Content hash (same as artifact_id)
+            uploaded_by: User ID who uploaded the artifact
+            file_size: File size in bytes
+            filename: Original filename
+        """
+        from datetime import datetime, timezone
+        
+        event = {
+            "event_type": "ArtifactCommitted",
+            "artifact_id": artifact_id,
+            "model_id": model_id,  
+            "storage_path": storage_path,
+            "content_hash": content_hash, 
+            "uploaded_by": uploaded_by,
+            "file_size": file_size,
+            "filename": filename,
+            "timestamp": datetime.now(timezone.utc).isoformat() + "Z"
+        }
+        
+        self._publish_event("artifact.committed", event) 
     
     def _publish_event(
             self, 
