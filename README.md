@@ -42,6 +42,7 @@ A distributed microservices platform for collaborative reinforcement learning mo
 
 ```
 
+
 rllabs/
 ├── api_gateway/              # API Gateway service (JWT auth, routing, rate limiting)
 │   ├── config.py            # Service routing configuration
@@ -94,7 +95,9 @@ rllabs/
 │   │   └── views/           # Page views
 │   ├── Dockerfile
 │   └── Dockerfile.dev
-│
+├── postgres-init
+│	├── create-multiple-databases.sh    # Creates multiple Postgres DBs
+| 
 ├── shared/                   # Shared utilities across services
 │   └── observability/       # OpenTelemetry tracing and logging
 │       ├── logging.py
@@ -140,11 +143,13 @@ rllabs/
 ├── README.md                 # This file
 ├── OBSERVABILITY.md         # Observability guide
 └── generate_token.py         # JWT token generation utility
+└── create_sample_weights.py
 └── kind-cluster-config.yml
 └── sample_model.pth
 └── training_config.json
 └── dataset_config.json
 └── upload_training_artifact.py 
+└── comprehensive_load_test.py    # Load test for Kubernetes/scaling
 ```
 
 ---
