@@ -140,4 +140,4 @@ spec:
     - protocol: TCP
       port: 3000
       targetPort: 3000
-  type: LoadBalancer
+  type: ClusterIP  # Changed from LoadBalancer - access via Ingress or port-forward only

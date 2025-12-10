@@ -16,7 +16,8 @@ metadata:
 spec:
   ingressClassName: nginx
   rules:
-    - http:
+    - host: api.localhost  # Use host-based routing for better security
+      http:
         paths:
           # API Gateway handles all /api/* routes
           - path: /
@@ -26,4 +27,27 @@ spec:
                 name: api-gateway
                 port:
                   number: 8080
+---
+# Ingress resource for Frontend
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: frontend-ingress
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: localhost  # Frontend on root domain
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: 80
 

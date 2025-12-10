@@ -30,9 +30,9 @@ except ImportError:
     print("Error: 'requests' library not found. Install it with: pip install requests")
     sys.exit(1)
 
-GATEWAY_URL = "http://localhost:8080"  
+GATEWAY_URL = "http://api.localhost"  # Ingress URL for local access
 if "KUBERNETES_SERVICE_HOST" in os.environ:
-    GATEWAY_URL = "http://api-gateway:8080"
+    GATEWAY_URL = "http://api-gateway:8080"  # Internal service URL when running in-cluster
 
 def generate_token(gateway_url: str) -> Optional[str]:
     """Generate a JWT token for authentication"""
@@ -95,8 +95,10 @@ def generate_token(gateway_url: str) -> Optional[str]:
             
     except requests.exceptions.ConnectionError as e:
         print(f"Error: Could not connect to {gateway_url}")
-        print(f"   Make sure API Gateway is running and port-forward is active:")
-        print(f"   kubectl port-forward svc/api-gateway 8080:8080")
+        print(f"   Make sure API Gateway is running and ingress is configured:")
+        print(f"   kubectl get ingress api-gateway-ingress")
+        print(f"   Access via: http://api.localhost")
+        print(f"   Or use port-forward for local dev: kubectl port-forward svc/api-gateway 8080:8080")
         return None
     except Exception as e:
         print(f"Warning: Could not generate token: {e}")

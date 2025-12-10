@@ -700,9 +700,11 @@ class ComprehensiveLoadTester:
                 print(f"URL: {self.base_url}")
                 print()
                 print("Possible solutions:")
-                print("   1. Start port-forward: kubectl port-forward svc/api-gateway 8080:8080")
-                print("   2. Check if API Gateway is running: kubectl get pods -l app=api-gateway")
-                print("   3. Verify service: kubectl get svc api-gateway")
+                print("   1. Check ingress: kubectl get ingress api-gateway-ingress")
+                print("   2. Access via ingress: http://api.localhost")
+                print("   3. Or use port-forward: kubectl port-forward svc/api-gateway 8080:8080 (then use --url http://localhost:8080)")
+                print("   4. Check if API Gateway is running: kubectl get pods -l app=api-gateway")
+                print("   5. Verify service: kubectl get svc api-gateway")
                 print()
                 return
             
@@ -868,8 +870,8 @@ async def main():
         description="Comprehensive load test for RLLabs platform",
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--url", default="http://localhost:8080", 
-                       help="Base URL of API Gateway (default: http://localhost:8080)")
+    parser.add_argument("--url", default="http://api.localhost", 
+                       help="Base URL of API Gateway (default: http://api.localhost via Ingress, or use --url http://localhost:8080 for port-forward)")
     parser.add_argument("--users", type=int, default=10, 
                        help="Number of concurrent users")
     parser.add_argument("--duration", type=int, default=60, 

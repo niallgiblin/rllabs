@@ -354,5 +354,5 @@ spec:
     - protocol: TCP
       port: 9090
       targetPort: 9090
-  type: LoadBalancer
+  type: ClusterIP  # Changed from LoadBalancer - access via Ingress or port-forward only
 

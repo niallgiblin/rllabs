@@ -378,33 +378,51 @@ async def register_model_version(
     if not db_model:
         raise HTTPException(status_code=404, detail="Model not found")
 
+    import time
+    endpoint_start = time.time()
+    query_time = 0
+    check_time = 0
+    
     try:
         version = version_data.version
         if version is None:
-            from sqlalchemy import func
-            max_version = db.query(func.max(database.ModelVersion.version)).filter(
+            from sqlalchemy import func, desc
+            query_start = time.time()
+            latest_version = db.query(database.ModelVersion.version).filter(
                 database.ModelVersion.model_id == model_id
-            ).scalar()
-            version = (max_version or 0) + 1
-            logger.info(f"Auto-calculated version {version} for model {model_id} (max existing: {max_version})")
+            ).order_by(desc(database.ModelVersion.version)).limit(1).scalar()
+            query_time = time.time() - query_start
+            version = (latest_version or 0) + 1
+            if query_time > 0.1:
+                logger.warning(f"Slow version lookup for model {model_id}: {query_time*1000:.2f}ms")
+            logger.info(f"Auto-calculated version {version} for model {model_id} (max existing: {latest_version})")
         else:
+            check_start = time.time()
             existing = db.query(database.ModelVersion).filter(
                 database.ModelVersion.model_id == model_id,
                 database.ModelVersion.version == version
             ).first()
+            check_time = time.time() - check_start
+            if check_time > 0.1:
+                logger.warning(f"Slow version check for model {model_id}: {check_time*1000:.2f}ms")
             if existing:
                 raise HTTPException(
                     status_code=409,
                     detail=f"Version {version} already exists for this model"
                 )
         
+        insert_start = time.time()
         version_dict = version_data.model_dump()
         version_dict['version'] = version
         db_version = database.ModelVersion(**version_dict, model_id=model_id)
         db.add(db_version)
         db.commit()
         db.refresh(db_version)
+        insert_time = time.time() - insert_start
+        if insert_time > 0.2:
+            logger.warning(f"Slow version insert for model {model_id}: {insert_time*1000:.2f}ms")
         
+        cache_start = time.time()
         if CACHING_ENABLED:
             try:
                 invalidate_model_versions(model_id)
@@ -417,6 +435,20 @@ async def register_model_version(
                 logger.info(f"Cache invalidated after registering version for model {model_id} (including models list)")
             except Exception as e:
                 logger.warning(f"Failed to invalidate cache after registering version: {e}")
+        cache_time = time.time() - cache_start
+        
+        endpoint_time = time.time() - endpoint_start
+        
+        if endpoint_time > 0.5:
+            logger.warning(
+                f"Slow POST /models/{model_id}/versions: {endpoint_time*1000:.0f}ms total "
+                f"(query: {query_time*1000:.0f}ms, check: {check_time*1000:.0f}ms, insert: {insert_time*1000:.0f}ms, cache: {cache_time*1000:.0f}ms)"
+            )
+        else:
+            logger.info(
+                f"POST /models/{model_id}/versions completed in {endpoint_time*1000:.0f}ms "
+                f"(query: {query_time*1000:.0f}ms, check: {check_time*1000:.0f}ms, insert: {insert_time*1000:.0f}ms, cache: {cache_time*1000:.0f}ms)"
+            )
         
         logger.info(
             f"Registered version {db_version.version} for model {model_id} "
@@ -536,19 +568,41 @@ async def list_models(
                     pass  
             
             if total is None:
-                total = db.query(func.count(database.Model.id)).scalar()
+                try:
+                    result = db.execute(text(
+                        "SELECT reltuples::bigint AS approximate_count "
+                        "FROM pg_class WHERE relname = 'models'"
+                    ))
+                    approx_count = result.scalar()
+                    if approx_count and approx_count > 0:
+                        total = int(approx_count)
+                        logger.debug(f"Using approximate count: {total}")
+                    else:
+                        total = db.query(func.count(database.Model.id)).scalar()
+                        logger.debug(f"Using exact count: {total}")
+                except Exception as e:
+                    logger.debug(f"Approximate count failed ({e}), using exact count")
+                    total = db.query(func.count(database.Model.id)).scalar()
+                
                 if CACHING_ENABLED:
                     try:
-                        get_cache().set(f"{PREFIX}:models:count", str(total), ttl=60)
+                        get_cache().set(f"{PREFIX}:models:count", str(total), ttl=300)
                     except Exception:
                         pass  
             
             total_pages = (total + page_size - 1) // page_size if total > 0 else 0
             
             query = db.query(database.Model).order_by(database.Model.id)
+            
             if include_versions:
                 query = query.options(selectinload(database.Model.versions))
+            
             models = query.offset(offset).limit(page_size).all()
+            
+            if include_versions and models:
+                for model in models:
+                    if hasattr(model, 'versions') and model.versions and len(model.versions) > 10:
+                        model.versions = sorted(model.versions, key=lambda v: v.version, reverse=True)[:10]
             
             query_time = time.time() - query_start
             

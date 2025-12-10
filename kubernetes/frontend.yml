@@ -59,4 +59,4 @@ spec:
     - protocol: TCP
       port: 80
       targetPort: 80
-  type: LoadBalancer
+  type: ClusterIP  # Changed from LoadBalancer - access via Ingress only

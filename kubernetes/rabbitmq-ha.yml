@@ -228,13 +228,14 @@ spec:
       name: clustering
 
 ---
-# LoadBalancer Service for external access
+# ClusterIP Service for RabbitMQ (internal access only)
+# For external access, use port-forward: kubectl port-forward svc/rabbitmq-management 15672:15672
 apiVersion: v1
 kind: Service
 metadata:
   name: rabbitmq-management
 spec:
-  type: LoadBalancer
+  type: ClusterIP  # Changed from LoadBalancer - use port-forward for management UI access
   selector:
     app: rabbitmq
   ports:

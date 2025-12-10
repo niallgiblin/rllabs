@@ -133,7 +133,7 @@ if docker build \
     --progress=plain \
     --tag frontend:latest \
     --file frontend/Dockerfile \
-    --build-arg VITE_API_BASE_URL=http://localhost:8080 \
+    --build-arg VITE_API_BASE_URL=http://api.localhost \
     --build-arg BUILDKIT_INLINE_CACHE=1 \
     ./frontend > /tmp/frontend-build.log 2>&1
 then
@@ -323,6 +323,9 @@ kubectl apply -f kubernetes/model-train-service.yml 2>/dev/null || true
 kubectl apply -f kubernetes/api-gateway.yml 2>/dev/null || true
 kubectl apply -f kubernetes/frontend.yml 2>/dev/null || true
 
+echo "  Applying Ingress resources..."
+kubectl apply -f kubernetes/ingress.yml 2>/dev/null || true
+
 echo "  Restarting deployments to ensure fresh start..."
 for deployment in api-gateway model-catalog-service upload-download-service collaboration-service model-train-service frontend; do
     kubectl rollout restart deployment/$deployment 2>/dev/null || true
@@ -431,16 +434,14 @@ if [ "$HEALTH_EXIT" -eq 0 ]; then
     echo "All services are running and ready. The system is ready for load testing."
     echo ""
 echo "Next steps:"
-echo "  1. Access the Frontend: http://localhost:5173"
-echo "  2. Test the API: curl http://localhost:8080/health"
+echo "  1. Access the Frontend: http://localhost (via Ingress)"
+echo "  2. Test the API: curl http://api.localhost/api/health"
 echo "  3. Run load test: python tests/comprehensive_load_test.py --users 10 --duration 60"
-echo "  4. Check Grafana: http://localhost:3000"
 echo ""
-echo "Note: Frontend port-forward is set up on port 5173"
-echo "      API Gateway port-forward is set up on port 8080"
-echo "      If port-forwards fail, run:"
-echo "        kubectl port-forward svc/frontend 5173:80"
-echo "        kubectl port-forward svc/api-gateway 8080:8080"
+echo "Note: All services are accessible via Ingress (no port-forwards needed)"
+echo "      Frontend: http://localhost"
+echo "      API Gateway: http://api.localhost"
+echo "      MinIO: http://minio.localhost"
 else
     echo -e "${YELLOW}⚠️  SYSTEM STARTUP COMPLETE - SOME SERVICES NOT READY${NC}"
     echo ""
@@ -455,7 +456,45 @@ fi
 
 echo ""
 echo "───────────────────────────────────────────────────────────────"
-echo -e "${BLUE}STEP 7: Setting Up Observability Port Forwarding${NC}"
+echo -e "${BLUE}STEP 7: Verifying Ingress Configuration${NC}"
+echo "───────────────────────────────────────────────────────────────"
+echo ""
+
+echo "  Verifying ingress resources are ready..."
+INGRESS_READY=false
+for i in {1..30}; do
+    if kubectl get ingress api-gateway-ingress >/dev/null 2>&1 && \
+       kubectl get ingress frontend-ingress >/dev/null 2>&1; then
+        INGRESS_READY=true
+        break
+    fi
+    sleep 2
+done
+
+if [ "$INGRESS_READY" = true ]; then
+    echo -e "  ${GREEN}✓ Ingress resources configured${NC}"
+else
+    echo -e "  ${YELLOW}⚠️  Ingress resources not found - applying...${NC}"
+    kubectl apply -f kubernetes/ingress.yml 2>/dev/null || true
+fi
+
+echo ""
+echo "───────────────────────────────────────────────────────────────"
+echo -e "${GREEN}Service Access URLs${NC}"
+echo "───────────────────────────────────────────────────────────────"
+echo ""
+echo "Access the following services via Ingress:"
+echo ""
+echo "  🌐 Frontend:        http://localhost"
+echo "  🔌 API Gateway:      http://api.localhost"
+echo "  📦 MinIO API:        http://minio.localhost"
+echo "  📦 MinIO Console:    http://minio-console.localhost"
+echo ""
+echo "  📤 Upload/Download: http://api.localhost/api/uploads"
+echo ""
+echo ""
+echo "───────────────────────────────────────────────────────────────"
+echo -e "${BLUE}STEP 8: Setting Up Observability Port Forwarding${NC}"
 echo "───────────────────────────────────────────────────────────────"
 echo ""
 
@@ -551,65 +590,12 @@ else
 fi
 
 echo ""
-if kubectl get svc api-gateway >/dev/null 2>&1; then
-    if start_port_forward "api-gateway" "8080" "API Gateway"; then
-        :
-    else
-        echo -e "  ${YELLOW}⚠️  API Gateway port-forward failed or port is in use${NC}"
-        echo "     This is required for load testing. To fix:"
-        echo "     lsof -ti:8080 | xargs kill"
-        echo "     kubectl port-forward svc/api-gateway 8080:8080"
-    fi
-else
-    echo -e "  ${YELLOW}⚠️  API Gateway service not found. Skipping...${NC}"
-fi
-
-echo ""
-if kubectl get svc frontend >/dev/null 2>&1; then
-    cleanup_port_forward "frontend" "5173"
-    sleep 1
-    if check_port 5173; then
-        echo -e "  ${YELLOW}⚠️  Port 5173 is still in use. Skipping Frontend...${NC}"
-        echo "     To manually set up:"
-        echo "     lsof -ti:5173 | xargs kill"
-        echo "     kubectl port-forward svc/frontend 5173:80"
-    else
-        echo -n "  Starting port forward for Frontend on port 5173... "
-        kubectl port-forward svc/frontend 5173:80 > /tmp/frontend-port-forward.log 2>&1 &
-        FRONTEND_PID=$!
-        sleep 3
-        if kill -0 $FRONTEND_PID 2>/dev/null && check_port 5173; then
-            echo -e "${GREEN}✓${NC} (PID: $FRONTEND_PID)"
-        else
-            echo -e "${YELLOW}⚠️  Failed to start (check logs: /tmp/frontend-port-forward.log)${NC}"
-        fi
-    fi
-else
-    echo -e "  ${YELLOW}⚠️  Frontend service not found. Skipping...${NC}"
-fi
-
-echo ""
-echo -e "${BLUE}Note: Upload/Download Service${NC}"
-echo "  Upload/Download Service is accessed through the API Gateway (port 8080)"
-echo "  No direct port-forward needed - use: http://localhost:8080/api/uploads"
-echo "  For ingress: http://api.localhost/api/uploads"
-echo ""
-echo -e "${BLUE}Security Architecture:${NC}"
-echo "  ✓ All API requests go through API Gateway (authentication, rate limiting)"
-echo "  ✓ Authorization happens BEFORE presigned URL generation"
-echo "  ✓ MinIO ingress is configured for presigned URLs (clients access via http://minio.localhost)"
-echo "  ✓ Presigned URLs are time-limited (1 hour) and part-specific (secure)"
-echo ""
 echo "───────────────────────────────────────────────────────────────"
 echo -e "${GREEN}Observability Services Access${NC}"
 echo "───────────────────────────────────────────────────────────────"
 echo ""
-echo "Access the following services:"
+echo "Access the following observability services via port-forward:"
 echo ""
-echo "  🌐 Frontend:     http://localhost:5173 (or via ingress)"
-echo "  🔌 API Gateway:  http://localhost:8080 (or via ingress: http://api.localhost)"
-echo "  📦 MinIO:        http://minio.localhost (API) or http://minio-console.localhost (Console)"
-echo "  📤 Upload/Download: Via API Gateway at http://localhost:8080/api/uploads"
 echo "  📊 Grafana:      http://localhost:3000 (admin/admin)"
 echo "  📈 Prometheus:   http://localhost:9090"
 echo "  🔍 Jaeger:       http://localhost:16686"
@@ -620,15 +606,6 @@ echo "Port forwarding logs are available in /tmp/<service>-port-forward.log"
 echo ""
 echo "To stop all port forwarding:"
 echo "  pkill -f 'kubectl port-forward'"
-echo ""
-echo "To stop individual services:"
-echo "  lsof -ti:5173 | xargs kill  # Frontend"
-echo "  lsof -ti:8080 | xargs kill  # API Gateway"
-echo "  lsof -ti:3000 | xargs kill  # Grafana"
-echo "  lsof -ti:9090 | xargs kill  # Prometheus"
-echo "  lsof -ti:16686 | xargs kill # Jaeger"
-echo "  lsof -ti:9093 | xargs kill  # Alertmanager"
-echo "  lsof -ti:3100 | xargs kill  # Loki"
 echo ""
 
 if [ "$HEALTH_EXIT" -eq 0 ]; then

@@ -4,7 +4,7 @@ Manual Test Runner for RLLabs
 ==============================
 
 Runs all manual tests from the README to verify the system works in Kind/Kubernetes.
-All tests go through the API Gateway at http://localhost:8080
+All tests go through the API Gateway at http://api.localhost (via Ingress)
 """
 
 import requests
@@ -17,7 +17,7 @@ import re
 from typing import Optional, Dict, Any
 import os
 
-API_GATEWAY_URL = "http://localhost:8080"
+API_GATEWAY_URL = "http://api.localhost"
 TIMEOUT = 10
 
 GREEN = '\033[0;32m'
@@ -1383,11 +1383,13 @@ class TestRunner:
                 print(f"{GREEN}✓ API Gateway is accessible{NC}\n")
             else:
                 print(f"{RED}✗ API Gateway returned status {response.status_code}{NC}\n")
-                print(f"{YELLOW}Make sure port-forward is running: kubectl port-forward svc/api-gateway 8080:8080{NC}\n")
+                print(f"{YELLOW}Make sure ingress is configured: kubectl get ingress api-gateway-ingress{NC}\n")
+                print(f"{YELLOW}Or use port-forward for local dev: kubectl port-forward svc/api-gateway 8080:8080{NC}\n")
                 return False
         except Exception as e:
             print(f"{RED}✗ Cannot connect to API Gateway: {str(e)}{NC}\n")
-            print(f"{YELLOW}Make sure port-forward is running: kubectl port-forward svc/api-gateway 8080:8080{NC}\n")
+            print(f"{YELLOW}Make sure ingress is configured: kubectl get ingress api-gateway-ingress{NC}\n")
+            print(f"{YELLOW}Access via: http://api.localhost (or use port-forward: kubectl port-forward svc/api-gateway 8080:8080){NC}\n")
             return False
         
         tests = [

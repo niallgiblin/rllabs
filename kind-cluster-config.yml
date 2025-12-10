@@ -9,18 +9,15 @@ nodes:
       kubeletExtraArgs:
         node-labels: "ingress-ready=true"
   extraPortMappings:
-  # HTTP for Ingress
+  # HTTP for Ingress (primary external access method)
   - containerPort: 80
     hostPort: 80
     protocol: TCP
-  # HTTPS for Ingress
+  # HTTPS for Ingress (for TLS termination)
   - containerPort: 443
     hostPort: 443
     protocol: TCP
-  # NodePort range for direct access
-  - containerPort: 30000
-    hostPort: 30000
-    protocol: TCP
+  # NodePort range removed - using Ingress-only architecture for better security
 - role: worker
 - role: worker
 - role: worker

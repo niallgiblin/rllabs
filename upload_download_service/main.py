@@ -29,6 +29,7 @@ except ImportError:
     logger.warning("Observability module not available, using basic logging")
 
 
+import asyncio
 from fastapi import FastAPI, Depends, HTTPException, Header, status, Request, BackgroundTasks, Query
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
@@ -63,16 +64,21 @@ def get_model_catalog_client() -> httpx.AsyncClient:
     """
     Get or create global HTTP client for Model Catalog calls (singleton pattern).
     Reusing the client provides connection pooling and better performance.
+    
+    Optimized for low latency:
+    - Increased keepalive connections and expiry to reduce connection overhead
+    - Shorter connect timeout to fail fast on network issues
     """
     global _model_catalog_client
     if _model_catalog_client is None:
         _model_catalog_client = httpx.AsyncClient(
-            timeout=httpx.Timeout(30.0, connect=5.0),
+            timeout=httpx.Timeout(10.0, connect=2.0),
             limits=httpx.Limits(
-                max_connections=50,
-                max_keepalive_connections=25,
-                keepalive_expiry=30.0
-            )
+                max_connections=200,  
+                max_keepalive_connections=100,  
+                keepalive_expiry=180.0  
+            ),
+            http2=False 
         )
     return _model_catalog_client
 
@@ -108,6 +114,25 @@ async def lifespan(app: FastAPI):
     
     storage = get_storage_service()
     await storage.initialize()
+    
+    try:
+        client = get_model_catalog_client()
+        warmup_tasks = []
+        for i in range(5):
+            warmup_tasks.append(
+                client.get(f"{MODEL_CATALOG_URL}/health", timeout=httpx.Timeout(2.0))
+            )
+        try:
+            results = await asyncio.gather(*warmup_tasks, return_exceptions=True)
+            success_count = sum(1 for r in results if not isinstance(r, Exception))
+            if success_count > 0:
+                logger.info(f"Model Catalog connection warmup: {success_count}/5 connections established")
+            else:
+                logger.warning("Model Catalog warmup failed (will retry on first request)")
+        except Exception as e:
+            logger.warning(f"Model Catalog warmup error (will retry on first request): {e}")
+    except Exception as e:
+        logger.warning(f"Failed to warm up Model Catalog client: {e}")
     
     logger.info("Upload/Download Service ready")
     
@@ -745,8 +770,11 @@ async def register_with_model_catalog(
     Raises:
         Exception if Model Catalog call fails
     """
+    import time
+    start_time = time.time()
     client = get_model_catalog_client()
     try:
+        connect_start = time.time()
         response = await client.post(
             f"{MODEL_CATALOG_URL}/models/{model_id}/versions",
             json={
@@ -758,11 +786,22 @@ async def register_with_model_catalog(
                 "Content-Type": "application/json"
             }
         )
+        request_time = time.time() - connect_start
         response.raise_for_status()
+        parse_start = time.time()
         version_data = response.json()
+        parse_time = time.time() - parse_start
         assigned_version = version_data.get("version")
         updated_storage_path = version_data.get("storage_path", storage_path)
-        logger.info(f"Successfully registered version {assigned_version} for model {model_id} with Model Catalog")
+        total_time = time.time() - start_time
+        
+        if total_time > 1.0:
+            logger.warning(
+                f"Slow Model Catalog registration for model {model_id}: "
+                f"total={total_time*1000:.0f}ms, request={request_time*1000:.0f}ms, parse={parse_time*1000:.0f}ms"
+            )
+        else:
+            logger.info(f"Successfully registered version {assigned_version} for model {model_id} with Model Catalog ({total_time*1000:.0f}ms)")
         
         return {
             "version": assigned_version,
@@ -770,10 +809,12 @@ async def register_with_model_catalog(
         }
         
     except httpx.HTTPStatusError as e:
-        logger.error(f"Model Catalog returned error: {e.response.status_code} - {e.response.text}")
+        total_time = time.time() - start_time
+        logger.error(f"Model Catalog returned error after {total_time*1000:.0f}ms: {e.response.status_code} - {e.response.text}")
         raise Exception(f"Model Catalog error: {e.response.status_code}")
     except httpx.RequestError as e:
-        logger.error(f"Failed to connect to Model Catalog: {e}")
+        total_time = time.time() - start_time
+        logger.error(f"Failed to connect to Model Catalog after {total_time*1000:.0f}ms: {e}")
         raise Exception(f"Model Catalog unavailable: {str(e)}")
 
 

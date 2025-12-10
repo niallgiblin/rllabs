@@ -114,7 +114,7 @@ async def proxy_request(
         else:
             request_func = _make_request
         
-        max_retries = 1  
+        max_retries = 3  
         for attempt in range(max_retries):
             try:
                 response = await request_func(
