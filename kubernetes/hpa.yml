@@ -52,11 +52,11 @@ spec:
       stabilizationWindowSeconds: 0  
       policies:
         - type: Percent
-          value: 200 
-          periodSeconds: 15  
+          value: 300 
+          periodSeconds: 10  
         - type: Pods
-          value: 4  
-          periodSeconds: 15  
+          value: 6  
+          periodSeconds: 10  
       selectPolicy: Max  
 
 ---
@@ -99,11 +99,11 @@ spec:
       stabilizationWindowSeconds: 0  
       policies:
         - type: Percent
-          value: 150  
-          periodSeconds: 15  
+          value: 200  
+          periodSeconds: 10  
         - type: Pods
-          value: 3 
-          periodSeconds: 15  
+          value: 5 
+          periodSeconds: 10  
       selectPolicy: Max
 
 ---
@@ -143,15 +143,15 @@ spec:
           periodSeconds: 30 
       selectPolicy: Max  
     scaleUp:
-      stabilizationWindowSeconds: 0 
+      stabilizationWindowSeconds: 0  
       policies:
         - type: Percent
-          value: 200  
-          periodSeconds: 15  
+          value: 300  
+          periodSeconds: 10  
         - type: Pods
-          value: 4 
-          periodSeconds: 15 
-      selectPolicy: Max  
+          value: 6 
+          periodSeconds: 10 
+      selectPolicy: Max
 
 
 ---

@@ -82,6 +82,45 @@ async def check_download_permission(
         ).first()
         
         if not session:
+            model_catalog_url = os.getenv("MODEL_CATALOG_URL", "http://model-catalog-service:8000")
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    response = await client.get(
+                        f"{model_catalog_url}/versions/by-hash/{artifact_id}",
+                        headers={"Content-Type": "application/json"}
+                    )
+                    
+                    if response.status_code == 200:
+                        version_data = response.json()
+                        model_id = version_data.get("model_id")
+                        
+                        if model_id:
+                            if not user_id:
+                                logger.info(
+                                    f"Public download granted for artifact {artifact_id} "
+                                    f"via model version registration (model_id: {model_id})"
+                                )
+                                return True, None
+                            
+                            model_to_check = training_model_id if training_model_id else model_id
+                            has_model_access = await check_model_access(db, user_id, model_to_check, model_catalog_url)
+                            
+                            if has_model_access:
+                                logger.info(
+                                    f"User {user_id} granted access to artifact {artifact_id} "
+                                    f"via model version registration (model_id: {model_id})"
+                                )
+                                return True, None
+                            else:
+                                logger.warning(
+                                    f"User {user_id} denied access to artifact {artifact_id} "
+                                    f"(no access to model {model_id})"
+                                )
+                                return False, "403"
+            except Exception as e:
+                logger.debug(f"Could not check model catalog for artifact {artifact_id}: {e}")
+            
+            # Fallback: check training model access if provided
             if training_model_id:
                 model_catalog_url = os.getenv("MODEL_CATALOG_URL", "http://model-catalog-service:8000")
                 has_model_access = await check_model_access(db, user_id, training_model_id, model_catalog_url)
@@ -91,7 +130,8 @@ async def check_download_permission(
                         f"via training model {training_model_id} permissions (no upload session found)"
                     )
                     return True, None
-            logger.info(f"No upload session found for artifact {artifact_id} - artifact not found")
+            
+            logger.info(f"No upload session or model version found for artifact {artifact_id} - artifact not found")
             return False, "404"  
         
         # Rule 1: Public downloads (no user_id) - allow access

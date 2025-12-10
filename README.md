@@ -2,9 +2,402 @@
 
 A distributed microservices platform for collaborative reinforcement learning model development, training, and management. Built with FastAPI, Vue.js, PostgreSQL, MinIO, Redis, and Kubernetes for production-grade scalability.
 
+---
+
+## Table of Contents
+
+- [Quick Start](#quick-start-setup-build-and-run)
+  - [Prerequisites](#prerequisites)
+  - [Setup and Build](#setup-and-build)
+  - [Alternative: Kubernetes Deployment](#alternative-kubernetes-deployment)
+- [Kubernetes Deployment](#kubernetes-deployment)
+  - [Monitoring Endpoints](#monitoring-endpoints)
+- [Running Tests](#running-tests)
+- [Architecture Overview](#architecture-overview)
+  - [Core Services](#core-services)
+  - [Supporting Infrastructure](#supporting-infrastructure)
+  - [Observability Stack](#observability-stack)
+- [Integration](#integration)
+- [API Usage](#api-usage)
+  - [Generating a JWT Token](#generating-a-jwt-token)
+  - [Creating a Model](#creating-a-model-via-gateway)
+  - [Uploading/Downloading Artifacts](#uploading-a-model-file)
+  - [Training Artifacts](#training-artifacts)
+  - [Training Jobs](#triggering-a-training-job)
+  - [Collaboration Service](#collaboration-service)
+- [Distributed Systems Architecture](#distributed-systems-architecture)
+  - [Communication Patterns](#communication-patterns)
+  - [CAP Theorem Trade-offs](#cap-theorem-trade-offs)
+  - [Fault Tolerance Mechanisms](#fault-tolerance-mechanisms)
+  - [Security Architecture](#security-architecture)
+  - [Data Consistency Strategies](#data-consistency-strategies)
+  - [Performance](#performance)
+  - [Scalability](#scalability)
+- [Configuration](#configuration)
+- [Performance Optimization](#performance-optimization)
+
+---
+
+## File Structure
+
+```
+
+rllabs/
+├── api_gateway/              # API Gateway service (JWT auth, routing, rate limiting)
+│   ├── config.py            # Service routing configuration
+│   ├── jwt_auth.py          # JWT authentication logic
+│   ├── main.py              # FastAPI application entry point
+│   ├── proxy.py             # Request proxying logic
+│   ├── rate_limiter.py      # Rate limiting implementation
+│   └── Dockerfile
+│
+├── model_catalog_service/    # Model metadata management service
+│   ├── cache.py             # Redis caching layer
+│   ├── database.py          # PostgreSQL database models
+│   ├── event_consumer.py    # RabbitMQ event consumer
+│   ├── event_publisher.py    # RabbitMQ event publisher
+│   ├── main.py              # FastAPI application
+│   └── Dockerfile
+│
+├── upload_download_service/  # File upload/download service
+│   ├── authorization.py     # RBAC authorization logic
+│   ├── database.py          # PostgreSQL models for upload sessions
+│   ├── event_publisher.py   # RabbitMQ event publishing
+│   ├── main.py              # FastAPI application
+│   ├── models.py            # Data models
+│   ├── session_manager.py   # Upload session management
+│   ├── storage.py           # MinIO/S3 storage operations
+│   └── Dockerfile
+│
+├── model_train_service/      # Training job processing service
+│   ├── agent.py             # DQN agent implementation
+│   ├── main.py              # RabbitMQ consumer entry point
+│   ├── model_brain.py       # Neural network model
+│   ├── model_trainer.py     # Training orchestration
+│   └── Dockerfile
+│
+├── collaboration_service/     # Comments and discussions service
+│   ├── database.py          # MongoDB models
+│   ├── dockerfile
+│   ├── events.py            # RabbitMQ event consumer
+│   ├── helpers.py           # Utility functions
+│   ├── main.py              # FastAPI application
+│   ├── schema.py            # Data schemas
+│   └── requirements.txt
+│
+├── frontend/                 # Vue.js frontend application
+│   ├── src/
+│   │   ├── components/      # Vue components
+│   │   ├── composables/     # Vue composables (auth, file upload)
+│   │   ├── router/          # Vue Router configuration
+│   │   ├── services/        # API service clients
+│   │   └── views/           # Page views
+│   ├── Dockerfile
+│   └── Dockerfile.dev
+│
+├── shared/                   # Shared utilities across services
+│   └── observability/       # OpenTelemetry tracing and logging
+│       ├── logging.py
+│       └── tracing.py
+│
+├── tests/                    # Test suite
+│   ├── test_catalog_service.py
+│   ├── test_collaboration_service.py
+│   ├── test_gateway.py
+│   ├── test_integration.py
+│   ├── test_rbac_authorization.py
+│   ├── test_training_flow.py
+│   ├── test_upload_download_service.py
+│   └── requirements.txt
+│
+├── kubernetes/               # Kubernetes manifests
+│   ├── api-gateway.yml
+│   ├── model-catalog-service.yml
+│   ├── upload-download-service.yml
+│   ├── collaboration-service.yml
+│   ├── model-train-service.yml
+│   ├── frontend.yml
+│   ├── postgres-ha.yml      # PostgreSQL HA configuration
+│   ├── redis-ha.yml         # Redis HA with Sentinel
+│   ├── rabbitmq-ha.yml      # RabbitMQ cluster
+│   ├── mongodb.yml          # MongoDB replica set
+│   ├── minio.yml
+│   ├── minio-ingress.yml
+│   ├── ingress.yml
+│   ├── hpa.yml              # Horizontal Pod Autoscaler
+│   ├── prometheus.yml       # Metrics collection
+│   ├── grafana.yml          # Dashboards
+│   ├── jaeger.yml           # Distributed tracing
+│   ├── loki.yml             # Log aggregation
+│   └── alertmanager.yml     # Alerting
+│
+├── scripts/                  # Utility scripts
+│   ├── start_everything.sh  # One-command Kubernetes deployment
+│   ├── run_manual_tests.py # Manual integration tests
+│   └── seed_database.py     # Database seeding
+│
+├── docker-compose.yml        # Docker Compose configuration
+├── README.md                 # This file
+├── OBSERVABILITY.md         # Observability guide
+└── generate_token.py         # JWT token generation utility
+└── kind-cluster-config.yml
+└── sample_model.pth
+└── training_config.json
+└── dataset_config.json
+└── upload_training_artifact.py 
+```
+
+---
+
+## System Architecture
+
+```mermaid
+graph TB
+    subgraph "Client Layer"
+        Browser[Browser<br/>Vue.js Frontend]
+    end
+
+    subgraph "API Gateway Layer"
+        Gateway[API Gateway<br/>Port 8080<br/>JWT Auth, Rate Limiting,<br/>Circuit Breakers]
+    end
+
+    subgraph "Application Services"
+        Catalog[Model Catalog Service<br/>Port 8001<br/>Metadata Management]
+        Upload[Upload/Download Service<br/>Port 8002<br/>File Operations, RBAC]
+        Training[Training Service<br/>Port 8003<br/>RabbitMQ Consumer]
+        Collab[Collaboration Service<br/>Port 8004<br/>Comments & Discussions]
+    end
+
+    subgraph "Message Broker"
+        RabbitMQ[RabbitMQ<br/>Port 5672<br/>Event-Driven Communication]
+    end
+
+    subgraph "Data Storage"
+        Postgres1[(PostgreSQL<br/>Model Catalog DB<br/>CP Alignment)]
+        Postgres2[(PostgreSQL<br/>Upload Sessions DB<br/>CP Alignment)]
+        MongoDB[(MongoDB Replica Set<br/>Comments DB<br/>CP Configuration)]
+        Redis[(Redis<br/>Cache & Rate Limiting<br/>AP Alignment)]
+        MinIO[MinIO<br/>Object Storage<br/>S3-Compatible]
+    end
+
+    subgraph "Observability Stack"
+        Prometheus[Prometheus<br/>Metrics Collection]
+        Grafana[Grafana<br/>Dashboards]
+        Jaeger[Jaeger<br/>Distributed Tracing]
+        Loki[Loki + Promtail<br/>Log Aggregation]
+        Alertmanager[Alertmanager<br/>Alert Routing]
+    end
+
+    Browser -->|HTTPS/HTTP| Gateway
+    Gateway -->|HTTP + JWT<br/>X-User-Id Header| Catalog
+    Gateway -->|HTTP + JWT<br/>X-User-Id Header| Upload
+    Gateway -->|HTTP + JWT<br/>X-User-Id Header| Collab
+    Gateway -->|HTTP| Training
+
+    Catalog -->|ACID Transactions| Postgres1
+    Catalog -->|Cache Reads| Redis
+    Catalog -->|Publish Events| RabbitMQ
+
+    Upload -->|ACID Transactions| Postgres2
+    Upload -->|RBAC Checks| Catalog
+    Upload -->|Presigned URLs| MinIO
+    Upload -->|Publish Events| RabbitMQ
+
+    Training -->|Consume Jobs| RabbitMQ
+    Training -->|Download Artifacts| Upload
+    Training -->|Upload Results| MinIO
+
+    Collab -->|Write Concern Majority| MongoDB
+    Collab -->|Cache Queries| Redis
+    Collab -->|Consume Events| RabbitMQ
+    Collab -->|Model Metadata| Catalog
+
+    RabbitMQ -->|ModelCreated Events| Collab
+    RabbitMQ -->|Training Jobs| Training
+
+    Catalog -.->|Metrics| Prometheus
+    Upload -.->|Metrics| Prometheus
+    Collab -.->|Metrics| Prometheus
+    Gateway -.->|Metrics| Prometheus
+
+    Catalog -.->|Traces| Jaeger
+    Upload -.->|Traces| Jaeger
+    Collab -.->|Traces| Jaeger
+    Gateway -.->|Traces| Jaeger
+
+    Catalog -.->|Logs| Loki
+    Upload -.->|Logs| Loki
+    Collab -.->|Logs| Loki
+    Gateway -.->|Logs| Loki
+
+    Prometheus -->|Query| Grafana
+    Loki -->|Query| Grafana
+    Jaeger -->|Query| Grafana
+    Prometheus -->|Alerts| Alertmanager
+
+    style Gateway fill:#4a90e2,stroke:#2c5aa0,stroke-width:3px,color:#fff
+    style Catalog fill:#50c878,stroke:#2d7a4e,stroke-width:2px,color:#fff
+    style Upload fill:#50c878,stroke:#2d7a4e,stroke-width:2px,color:#fff
+    style Training fill:#50c878,stroke:#2d7a4e,stroke-width:2px,color:#fff
+    style Collab fill:#50c878,stroke:#2d7a4e,stroke-width:2px,color:#fff
+    style RabbitMQ fill:#ff6b6b,stroke:#c92a2a,stroke-width:2px,color:#fff
+    style Postgres1 fill:#ffd93d,stroke:#f59f00,stroke-width:2px
+    style Postgres2 fill:#ffd93d,stroke:#f59f00,stroke-width:2px
+    style MongoDB fill:#ffd93d,stroke:#f59f00,stroke-width:2px
+    style Redis fill:#ff6b6b,stroke:#c92a2a,stroke-width:2px,color:#fff
+    style MinIO fill:#9b59b6,stroke:#6c3483,stroke-width:2px,color:#fff
+    style Prometheus fill:#e74c3c,stroke:#c0392b,stroke-width:2px,color:#fff
+    style Grafana fill:#e74c3c,stroke:#c0392b,stroke-width:2px,color:#fff
+    style Jaeger fill:#e74c3c,stroke:#c0392b,stroke-width:2px,color:#fff
+    style Loki fill:#e74c3c,stroke:#c0392b,stroke-width:2px,color:#fff
+```
+
+### Architecture Legend
+
+- **Blue (API Gateway)**: Entry point, authentication, routing
+- **Green (Application Services)**: Business logic services
+- **Red (Message Broker)**: Asynchronous event communication
+- **Yellow (Databases)**: Persistent data storage
+- **Purple (Object Storage)**: File storage (MinIO)
+- **Orange (Observability)**: Monitoring, logging, tracing
+
+### Communication Patterns
+
+- **Solid Lines**: Synchronous HTTP (request/response)
+- **Dashed Lines**: Asynchronous events (RabbitMQ)
+- **Dotted Lines**: Observability data (metrics, logs, traces)
+
+---
+
+## Quick Start: Setup, Build, and Run
+
+### Prerequisites
+
+**Required Dependencies:**
+
+- **Docker** v20.10+ and **Docker Compose** v2.0+
+- **Python 3.9+** (for running tests and token generation)
+- **Node.js** v18+ and **npm** (for frontend development)
+
+**Optional (for Kubernetes deployment):**
+
+- **kubectl** (Kubernetes CLI)
+- **Kind** (local Kubernetes cluster)
+
+NOTE: See OBSERVABILITY.md
+
+### Setup and Build
+
+**1. Clone the repository:**
+
+```bash
+git clone https://github.com/niallgiblin/rllabs
+cd rllabs
+```
+
+**2. Start all services (Docker Compose - Recommended for Quick Testing):**
+
+```bash
+docker compose up --build
+```
+
+This single command:
+
+- Builds all Docker images
+- Starts all services (Frontend, API Gateway, Model Catalog, Upload/Download, Training, Collaboration)
+- Starts all infrastructure (PostgreSQL, MongoDB, Redis, RabbitMQ, MinIO)
+- Frontend available at http://localhost:5173
+- API Gateway available at http://localhost:8080
+
+**3. Verify successful deployment:**
+
+```bash
+# Check API Gateway health
+curl http://localhost:8080/health
+
+# Check all services are running
+docker compose ps
+
+# View service logs
+docker compose logs -f
+```
+
+### Alternative: Kubernetes Deployment
+
+For Kubernetes deployment with full observability stack:
+
+NOTE: see [OBSERVABILITY.md](OBSERVABILITY.md) for detailed guide on Kubernetes, scalability and metric observability.
+
+```bash
+# One-command setup (deploys everything)
+./scripts/start_everything.sh
+
+# Or manual deployment
+kubectl apply -k kubernetes/
+```
+
+## Kubernetes Deployment
+
+See `kubernetes/` for production manifests. Deploy with:
+
+```bash
+kubectl apply -k kubernetes
+```
+
+Services include ConfigMaps, Secrets, Deployments, Services, Ingress resources, and Observability stack deployment.
+
+**Access the UIs:**
+
+| Service      | Command                                               | URL                                 |
+| ------------ | ----------------------------------------------------- | ----------------------------------- |
+| Grafana      | `kubectl port-forward svc/grafana 3000:3000`        | http://localhost:3000 (admin/admin) |
+| Jaeger       | `kubectl port-forward svc/jaeger-query 16686:16686` | http://localhost:16686              |
+| Prometheus   | `kubectl port-forward svc/prometheus 9090:9090`     | http://localhost:9090               |
+| Alertmanager | `kubectl port-forward svc/alertmanager 9093:9093`   | http://localhost:9093               |
+
+**The Debugging Journey:**
+
+1. **ALERT** fires → **WHAT** is wrong (Prometheus/Alertmanager)
+2. Find **TRACE** → **WHERE** the problem is (Jaeger)
+3. Query **LOGS** → **WHY** it failed (Loki via Grafana)
+
+### Monitoring Endpoints
+
+**Model Catalog Service:**
+
+- `GET /cache/stats` - Cache hit rate statistics per endpoint
+- `GET /database/pool-stats` - Connection pool usage (primary + replicas)
+- `GET /models/{model_id}/diagnostics` - Model-specific diagnostics
+
+### Running Tests
+
+**Install test dependencies:**
+
+```bash
+pip install -r tests/requirements.txt
+```
+
+**Run all tests:**
+
+```bash
+pytest tests/ -v
+```
+
+Stop and Cleanup
+
+```bash
+# Stop all services
+docker compose down
+
+# Stop and remove volumes (clean slate)
+docker compose down -v
+```
+
+---
+
 ## Architecture Overview
 
-RLLabs is designed as a microservices architecture where specialized services handle different aspects of the ML lifecycle:
+RLLabs is designed as a microservices architecture where specialised services handle different aspects of the ML lifecycle:
 
 ### Core Services
 
@@ -126,12 +519,12 @@ RLLabs is designed as a microservices architecture where specialized services ha
 
 - Distributed tracing backend
 - Receives traces via OTLP (OpenTelemetry Protocol)
-- Waterfall visualization for request flows
+- Waterfall visualisation for request flows
 - Service dependency graphs
 
 **Loki + Promtail**
 
-- Centralized log aggregation (like Prometheus, but for logs)
+- Centralised log aggregation
 - Promtail agents collect logs from all pods
 - LogQL query language for structured log queries
 - Trace ID correlation with Jaeger
@@ -140,87 +533,9 @@ RLLabs is designed as a microservices architecture where specialized services ha
 
 - Alert routing and notification management
 - Grouping, silencing, and inhibition rules
-- Configurable receivers (Slack, PagerDuty, email)
+- Configurable receivers (e.g. Slack, email)
 
-## Current Implementation Status
-
-### Fully Implemented
-
-**Frontend**
-
-- Landing page with model browsing
-- Model Collaboration page (UI skeleton)
-- Upload and Auth overlays
-- Responsive design with Tailwind v4
-
-**API Gateway**
-
-- Bearer JWT authentication (HS256)
-- Health endpoints for liveness/readiness
-- Route proxying to Model Catalog
-- Rate limiting (Redis-backed)
-- User context forwarding via headers
-- Security headers middleware
-
-**Model Catalog Service**
-
-- Model creation with ownership tracking
-- Version registration with duplicate prevention
-- Latest version querying
-- Direct PostgreSQL integration
-- Duplicate name and version handling
-- **Ownership API**: `/models/{model_id}/ownership` endpoint for RBAC permission checks
-- **Event Publishing**: ModelCreated events to RabbitMQ
-- **Version Registration**: Receives synchronous HTTP calls from Upload/Download Service (strong consistency, CP alignment)
-
-**Upload/Download Service**
-
-- Multipart upload workflow with presigned URLs
-- Content-addressed storage (SHA-256 based deduplication)
-- PostgreSQL metadata management for artifacts and sessions
-- **RBAC Authorization**:
-  - **Downloads**: Public downloads allowed (no auth required), authenticated users checked for ownership/model access
-  - **Uploads**: Authentication required (uploads must be signed in)
-  - Authorization happens before presigned URL generation (secure + performant)
-  - Owner can always download their artifacts
-  - Model-level permissions (users with model access can download artifacts)
-  - Cross-service permission checks (queries Model Catalog for model ownership)
-- Presigned URL generation for secure downloads
-- Upload session lifecycle (start, complete, abort)
-- **Event Publishing**: ArtifactCommitted events to RabbitMQ
-- Integration with Model Catalog for automatic version registration
-
-**RabbitMQ Integration**
-
-- Event publishers in Model Catalog and Upload/Download services
-- Topic exchanges (`model_events`, `artifact_events`) for event routing
-- **ModelCreated** event publishing on model creation
-- **ArtifactCommitted** event publishing on artifact upload completion
-- Synchronous HTTP calls from Upload/Download Service for version registration (strong consistency)
-- Graceful degradation if RabbitMQ unavailable
-- Persistent messages (survive broker restarts)
-- Connection retry logic with automatic reconnection
-
-**Training Service**
-
-- RabbitMQ consumer listening to `training_jobs` queue
-- Downloads artifacts (config JSON, dataset JSON, model weights .pth) from Upload/Download Service
-- Runs DQN training using PyTorch Agent
-- Saves trained weights and uploads back to MinIO
-- Automatic model version registration after training
-- User-scoped artifact downloads with proper authorization
-
-**Collaboration Service**
-
-- RESTful API for model comments (GET, POST, PUT, DELETE)
-- MongoDB replica set with CP configuration (write concern "majority")
-- Redis caching for comment queries (5-minute TTL)
-- Event consumer listening to `model_events` exchange (ModelCreated, ModelDeleted)
-- Automatic creator badge detection for comment authors
-- Nested comment threads with recursive deletion
-- Comment archiving on model deletion
-
-**Integration**
+## Integration
 
 - Gateway → Catalog authentication flow
 - Gateway → Upload/Download Service authentication flow
@@ -240,139 +555,15 @@ RLLabs is designed as a microservices architecture where specialized services ha
 - **Security**: Authorization at application layer, direct client-to-MinIO transfers for performance
 - **IP-Based Rate Limiting**: Unauthenticated users rate-limited by IP address
 
-## Setup and Installation
-
-### Prerequisites
-
-- **Docker** (v20.10+)
-- **Docker Compose** (v2.0+)
-- **Python 3.9+** (for running tests)
-- **Node.js** (v18+) and **npm** (for frontend)
-
-Kubernetes:
-
-- **kubectl**
-- **Kind** (local K8s cluster)
-
-### Quick Start Docker Compose
-
-1. Clone the repository:
-
-```bash
-git clone <repository-url>
-cd rllabs
-```
-
-2. Start all services (including frontend):
-
-```bash
-docker compose up --build
-```
-
-This starts:
-
-- **Frontend** on http://localhost:5173 (Vite dev server with hot reload)
-- **API Gateway** on http://localhost:8080 (single entry point for all API requests)
-- **Model Catalog** (accessible via API Gateway at http://localhost:8080/api/models)
-- **Upload/Download Service** (accessible via API Gateway at http://localhost:8080/api/uploads and /api/downloads)
-- **Training Service** (RabbitMQ consumer, no HTTP port)
-- **Collaboration Service** (accessible via API Gateway at http://localhost:8080/api/comments)
-- **PostgreSQL** (internal only - use `docker compose exec postgres_db psql -U rllabs -d model_catalog_db` for debugging)
-- **MongoDB Replica Set** (internal only - use `docker compose exec mongo1 mongosh --port 27017` for debugging)
-- **Redis** (internal only - use `docker compose exec redis_cache redis-cli` for debugging)
-- **RabbitMQ** (internal only - use `docker compose exec rabbitmq_messaging rabbitmq-diagnostics status` for debugging)
-- **MinIO** on http://localhost:9000 (console: http://localhost:9001 - required for presigned URLs)
-
-**Note**: The frontend is included in docker-compose and will be available at http://localhost:5173 after the build completes. For development with hot reload, the frontend uses Vite's dev server.
-
-3. Verify services are healthy:
-
-**Docker Compose:**
-```bash
-# All services accessed through API Gateway (security best practice)
-curl http://localhost:8080/health  # Gateway
-# Backend services are not directly accessible - all requests must go through API Gateway
-# This enforces centralized authentication, rate limiting, and circuit breakers
-# Training Service doesn't expose HTTP endpoint (RabbitMQ consumer only)
-```
-
-**Kind/Kubernetes:**
-```bash
-# All services accessed through API Gateway (port-forward required)
-curl http://localhost:8080/health  # Gateway
-# Backend services are not directly accessible - use API Gateway endpoints
-# Training Service doesn't expose HTTP endpoint (RabbitMQ consumer only)
-```
-
-**Security Note:** Backend services (Model Catalog, Upload/Download, Collaboration) are not exposed directly in either deployment. All client requests must go through the API Gateway at `http://localhost:8080`, which enforces:
-- JWT-based authentication
-- Rate limiting (user-based and IP-based)
-- Circuit breakers for fault tolerance
-- User context propagation (`X-User-Id` header)
-- Centralized security policies
-
-5. Check Training Service is running:
-
-**Docker Compose:**
-```bash
-docker compose logs model-train-service
-# Should see: "Waiting for messages on queue 'training_jobs'..."
-```
-
-**Kind/Kubernetes:**
-```bash
-kubectl logs -l app=model-train-service --tail=50
-# Should see: "Waiting for messages on queue 'training_jobs'..."
-```
-
-6. Stop and clean up:
-
-**Docker Compose:**
-```bash
-docker compose down -v
-```
-
-**Kind/Kubernetes:**
-```bash
-# Delete cluster
-kind delete cluster --name rllabs
-
-# Or delete specific resources
-kubectl delete -k kubernetes
-```
-
-### Docker Compose vs Kind/Kubernetes Differences
-
-**Service Access:**
-- **Docker Compose**: All application services are accessed through the API Gateway at `http://localhost:8080` (security best practice)
-- **Kind/Kubernetes**: All services are accessed through the API Gateway at `http://localhost:8080`. Backend services require port-forwards for direct access
-- **Both deployments**: Enforce the same security architecture - centralized authentication, rate limiting, and circuit breakers through the API Gateway
-
-**Health Checks:**
-- **Docker Compose**: Can check individual service health endpoints directly
-- **Kind/Kubernetes**: Health checks go through API Gateway; individual service health requires port-forwards or kubectl exec
-
-**Port Forwards (Development/Debugging Only):**
-- **Docker Compose**: Not needed - services bind directly to localhost ports
-- **Kind/Kubernetes**: Port-forwards are automatically set up by `start_everything.sh` for development convenience:
-  - API Gateway: `8080:8080` (or use ingress: `http://api.localhost`)
-  - Frontend: `5173:80`
-  - Grafana: `3000:3000`
-  - Prometheus: `9090:9090`
-  - Jaeger: `16686:16686`
-  - Alertmanager: `9093:9093`
-  - Loki: `3100:3100`
-  - **MinIO**: Uses ingress (`http://minio.localhost`) - no port-forward needed
-
-**Note**: Port-forwards bypass Kubernetes networking and are for development only. Production deployments should use ingress for external access.
-
 **Ingress (Production-Ready Access):**
+
 - **MinIO**: `http://minio.localhost` (API) and `http://minio-console.localhost` (Console)
-- **API Gateway**: `http://api.localhost` (if ingress hostname configured)
+- **API Gateway**: `http://api.localhost`
 - **Security**: Ingress provides proper Kubernetes networking, TLS termination, and routing
 - **Presigned URLs**: MinIO ingress enables direct client-to-storage transfers with proper authorization checks
 
 **Manual Testing:**
+
 - Both deployments support the same API endpoints through the API Gateway
 - All manual tests from the README work identically in both environments
 - Use `python3 scripts/run_manual_tests.py` to verify functionality in either environment
@@ -388,16 +579,21 @@ Ensure all services are running via Docker Compose:
 docker compose up -d
 ```
 
+**Test Dependencies:**
+Install all test dependencies:
+
+```bash
+pip install -r tests/requirements.txt
+```
+
 **Test Architecture:**
 All tests are integrated with the API Gateway and use JWT authentication. Tests route through `http://localhost:8080/api/*` endpoints, ensuring:
+
 - Centralized authentication and authorization
 - Consistent rate limiting
 - Proper user context forwarding (`X-User-Id` header)
 - Fault tolerance through circuit breakers
 - End-to-end validation of the gateway integration
-
-**Test Status:**
-**All 131 tests passing** - Comprehensive test coverage across all services
 
 **Unit Tests (Catalog Service)**
 
@@ -406,6 +602,7 @@ pytest tests/test_catalog_service.py -v
 ```
 
 Tests model CRUD operations, versioning, and error handling through the API Gateway:
+
 - Model creation, retrieval, and deletion
 - Version registration and latest version queries
 - Ownership endpoint for RBAC checks
@@ -561,16 +758,8 @@ Tests event consumer functionality:
 pytest tests/ -v
 ```
 
-Runs all 131 tests across gateway, catalog, integration, upload/download, training, collaboration, and RBAC suites. All tests use the API Gateway for consistent authentication and routing.
-
-**Test Dependencies:**
-Install all test dependencies:
-
-```bash
-pip install -r tests/requirements.txt
-```
-
 **Test Coverage Summary:**
+
 - API Gateway: Authentication, routing, rate limiting
 - Model Catalog: CRUD, versioning, ownership, events
 - Upload/Download: Multipart uploads, RBAC, presigned URLs
@@ -601,33 +790,6 @@ python generate_token.py --admin --user admin-1
 
 # Decode a token
 python generate_token.py --decode <token>
-```
-
-Or generate programmatically using PyJWT:
-
-```python
-import jwt
-from datetime import datetime, timedelta, timezone
-
-SECRET_KEY = "your-secret-key"  # Match api_gateway/jwt_auth.py
-
-# Regular user token
-payload = {
-    "sub": "user-123",  # User ID
-    "scopes": ["api:read", "api:write"],
-    "iat": int(datetime.now(timezone.utc).timestamp()),
-    "exp": int((datetime.now(timezone.utc) + timedelta(minutes=30)).timestamp())
-}
-token = jwt.encode(payload, SECRET_KEY, algorithm="HS256")
-
-# Admin token
-admin_payload = {
-    "sub": "admin-user",
-    "scopes": ["api:read", "api:write", "api:admin"],  # Include api:admin scope
-    "iat": int(datetime.now(timezone.utc).timestamp()),
-    "exp": int((datetime.now(timezone.utc) + timedelta(minutes=30)).timestamp())
-}
-admin_token = jwt.encode(admin_payload, SECRET_KEY, algorithm="HS256")
 ```
 
 ### Creating a Model (via Gateway)
@@ -795,14 +957,9 @@ curl -X DELETE http://localhost:8080/api/models/{model_id} \
 
 ```bash
 # Delete an artifact (owner or admin only)
-# Note: Gateway must have /api/artifacts route configured (see api_gateway/config.py)
 curl -X DELETE http://localhost:8080/api/artifacts/{artifact_id} \
   -H "Authorization: Bearer YOUR_JWT_TOKEN"
 ```
-
-**Note:** The API Gateway configuration includes `/api/artifacts` route. If you modify the gateway config, restart the gateway service to pick up changes:
-- **Docker Compose**: `docker compose restart api-gateway`
-- **Kind/Kubernetes**: `kubectl rollout restart deployment/api-gateway`
 
 **Authorization:**
 
@@ -814,21 +971,122 @@ curl -X DELETE http://localhost:8080/api/artifacts/{artifact_id} \
 
 **Note**: This is a hard delete - the artifact will be permanently removed from MinIO storage.
 
+### Training Artifacts
+
+Training jobs require three artifacts to be uploaded before submission:
+
+1. **Training Config** (`training_config.json`) - DQN model architecture configuration
+2. **Dataset Config** (`dataset_config.json`) - Maze/grid environment parameters
+3. **Model Weights** (`sample_model.pth`) - Pre-trained PyTorch model weights
+
+#### Training Config (`training_config.json`)
+
+Defines the neural network architecture for the DQN agent:
+
+```json
+{
+  "shape": [3, 10, 10],
+  "layers": [
+    {
+      "type": "Conv2d",
+      "in_channels": 3,
+      "out_channels": 16,
+      "kernel_size": 3,
+      "padding": 1
+    },
+    {"type": "ReLU"},
+    {"type": "Flatten"},
+    {"type": "Linear", "out_features": 128},
+    {"type": "ReLU"},
+    {"type": "Linear", "out_features": 4}
+  ]
+}
+```
+
+**Fields:**
+
+- `shape`: Input tensor shape `[channels, height, width]`
+- `layers`: List of layer definitions (Conv2d, Linear, ReLU, Flatten)
+
+#### Dataset Config (`dataset_config.json`)
+
+Defines the maze/grid environment and training hyperparameters:
+
+```json
+{
+  "grid_height": 10,
+  "grid_width": 10,
+  "channels": [[5, 5], [9, 9], [[0, 0], [1, 1], [2, 2]]],
+  "initial_epsilon_value": 0.9,
+  "initial_learning_rate": 0.001,
+  "initial_gamma_value": 0.95
+}
+```
+
+**Fields:**
+
+- `grid_height`, `grid_width`: Maze dimensions
+- `channels`: Channel positions for maze features
+- `initial_epsilon_value`: Exploration rate (ε-greedy)
+- `initial_learning_rate`: Learning rate for optimizer
+- `initial_gamma_value`: Discount factor (γ)
+
+#### Model Weights (`sample_model.pth`)
+
+Pre-trained PyTorch model weights matching the training config architecture. The repository includes a sample weights file, or you can generate one:
+
+```bash
+# Generate sample weights matching training_config.json
+python create_sample_weights.py
+```
+
+This creates `sample_model.pth` with a Sequential architecture matching the training config.
+
+#### Uploading Training Artifacts
+
+Use the `upload_training_artifact.py` utility script to upload artifacts through the API Gateway:
+
+```bash
+# Set JWT token (required for authentication)
+export JWT_TOKEN=$(python generate_token.py)
+
+# Upload training config
+python upload_training_artifact.py training_config.json --model-id 1 --type config
+
+# Upload dataset config
+python upload_training_artifact.py dataset_config.json --model-id 1 --type dataset
+
+# Upload model weights
+python upload_training_artifact.py sample_model.pth --model-id 1 --type model
+```
+
+**Script Features:**
+
+- Automatically handles JWT authentication (uses `generate_token.py` if no token provided)
+- Supports multipart uploads for large files
+- Auto-detects MinIO endpoint (Docker Compose vs Kubernetes)
+- Returns artifact IDs for use in training job submission
+
+**Manual Upload Alternative:**
+
+You can also upload artifacts using the API directly (see "Uploading a Model File" section). Make note of the `artifact_id` (SHA-256 hash) returned for each upload.
+
 ### Triggering a Training Job
 
 Training jobs are triggered by uploading the required artifacts (config, dataset, model weights) and then submitting a training job request.
 
 **Step 1: Upload Training Artifacts**
 
-First, upload the three required artifacts:
+Upload the three required artifacts using `upload_training_artifact.py` or the API:
 
 ```bash
-# 1. Upload training config JSON (DQN architecture config)
-# 2. Upload dataset config JSON (maze/grid parameters)
-# 3. Upload model weights .pth file (pre-trained model)
+# Using the utility script (recommended)
+python upload_training_artifact.py training_config.json --model-id 1 --type config
+python upload_training_artifact.py dataset_config.json --model-id 1 --type dataset
+python upload_training_artifact.py sample_model.pth --model-id 1 --type model
 ```
 
-See "Uploading a Model File" section above for upload instructions. Make note of the `artifact_id` (SHA-256 hash) returned for each upload.
+Make note of the `artifact_id` (SHA-256 hash) returned for each upload.
 
 **Step 2: Trigger Training Job**
 
@@ -893,7 +1151,7 @@ curl http://localhost:8080/api/models/{model_id}/versions
 curl http://localhost:8080/api/models/{model_id}/latest
 ```
 
-### Collaboration Service (Comments)
+### Collaboration Service
 
 **Create a Comment on a Model:**
 
@@ -997,6 +1255,7 @@ curl -X DELETE http://localhost:8080/api/comments/{comment_id} \
 ```
 
 **Features:**
+
 - Nested comment threads (replies to replies)
 - Creator badge detection (automatically marks model creator's comments)
 - Automatic comment archiving when models are deleted
@@ -1027,13 +1286,39 @@ All GET `/api/models*` endpoints are public (no authentication required). This e
 **Verify RabbitMQ is running:**
 
 **Docker Compose:**
+
+RabbitMQ management UI is not exposed by default. To access it, you can either:
+
+**Option 1: Add port mapping to docker-compose.yml** (add to rabbitmq service):
+
+```yaml
+ports:
+  - "15672:15672"  # Management UI
+  - "5672:5672"    # AMQP port (optional, for external access)
+```
+
+**Option 2: Access via Docker exec:**
+
 ```bash
-curl -u admin:admin_password http://localhost:15672/api/overview
+# Check RabbitMQ status
+docker compose exec rabbitmq_messaging rabbitmq-diagnostics status
+
+# List queues
+docker compose exec rabbitmq_messaging rabbitmqctl list_queues
+```
+
+**Option 3: Access management UI from within container:**
+
+```bash
+# Start a temporary container on the same network
+docker run -it --rm --network rllabs_rllabs-network curlimages/curl:latest \
+  curl -u admin:admin_password http://rabbitmq_messaging:15672/api/overview
 ```
 
 **Kubernetes/Kind:**
+
 ```bash
-# First, set up port-forward for RabbitMQ management UI
+# Set up port-forward for RabbitMQ management UI
 kubectl port-forward service/rabbitmq 15672:15672
 
 # Then in another terminal:
@@ -1042,76 +1327,31 @@ curl -u admin:admin_password http://localhost:15672/api/overview
 
 **View events via Management UI:**
 
-**Docker Compose:**
+**Docker Compose (if ports are exposed):**
+
 1. Open http://localhost:15672 in your browser
 2. Login with `admin` / `admin_password`
-3. Navigate to **Exchanges** → `model_events`
+3. Navigate to **Exchanges** → `model_events` or `artifact_events`
 4. Check **Bindings** to see queue subscriptions
 5. Monitor published messages in real-time
 
 **Kubernetes/Kind:**
+
 1. Set up port-forward: `kubectl port-forward service/rabbitmq 15672:15672`
 2. Open http://localhost:15672 in your browser
 3. Login with `admin` / `admin_password`
-4. Navigate to **Exchanges** → `model_events`
+4. Navigate to **Exchanges** → `model_events` or `artifact_events`
 5. Check **Bindings** to see queue subscriptions
 6. Monitor published messages in real-time
 
-**Testing event publishing programmatically:**
-
-**Docker Compose:**
-```python
-import pika
-import json
-
-# Connect to RabbitMQ
-credentials = pika.PlainCredentials('admin', 'admin_password')
-connection = pika.BlockingConnection(
-    pika.ConnectionParameters('localhost', 5672, credentials=credentials)
-)
-```
-
-**Kubernetes/Kind:**
-```python
-import pika
-import json
-
-# Note: Services connect via service name "rabbitmq" on port 5672 (internal cluster DNS)
-# For external access, use port-forward: kubectl port-forward service/rabbitmq 5672:5672
-# Then connect to localhost:5672
-credentials = pika.PlainCredentials('admin', 'admin_password')
-connection = pika.BlockingConnection(
-    pika.ConnectionParameters('localhost', 5672, credentials=credentials)  # Requires port-forward
-)
-channel = connection.channel()
-
-# Declare exchange
-channel.exchange_declare(exchange='model_events', exchange_type='topic', durable=True)
-
-# Create queue and bind
-result = channel.queue_declare(queue='test-queue', exclusive=True)
-queue_name = result.method.queue
-channel.queue_bind(exchange='model_events', queue=queue_name, routing_key='model.created')
-
-# Create a model (via API) - this will trigger event publishing
-# ... your model creation code ...
-
-# Consume event
-method, properties, body = channel.basic_get(queue=queue_name, auto_ack=True)
-if method:
-    event = json.loads(body)
-    print(f"Received event: {event['event_type']}")
-    print(f"Model: {event['model_name']}")
-
-connection.close()
-```
-
 **Monitoring events in tests:**
+
 Integration tests automatically verify event publishing. See `tests/test_integration.py`:
 
 - `test_rabbitmq_connectivity`: Verifies RabbitMQ is accessible
 - `test_model_created_event_published`: Tests ModelCreated event flow
 - `test_rabbitmq_graceful_degradation`: Ensures services work without RabbitMQ
+- `test_rabbitmq_artifact_event`: Tests ArtifactCommitted event flow
 
 ## Distributed Systems Architecture
 
@@ -1214,43 +1454,6 @@ Integration tests automatically verify event publishing. See `tests/test_integra
 - Authorization happens before URL generation (secure)
 - **Trade-off**: High performance (no backend bottleneck) + Security (authorization before access)
 
-**Network Security**
-
-**Current Implementation:**
-- Application services (Model Catalog, Upload/Download, Collaboration) are NOT directly exposed
-- All client requests must go through API Gateway (port 8080 or `http://api.localhost` via ingress)
-- **Docker Compose**: Infrastructure services (PostgreSQL, Redis, RabbitMQ, MongoDB) are exposed for development/debugging
-- **Kubernetes**: Infrastructure services are secured (ClusterIP) - NOT exposed externally
-- **MinIO**: Uses ingress (`minio.localhost`) for presigned URL direct transfers (authorization happens before URL generation)
-- **Port-Forwards**: Development convenience only - bypass Kubernetes networking. Not recommended for production.
-
-**Docker Compose vs Kubernetes Security:**
-- **Docker Compose**: Services secured by removing `ports:` mappings - services communicate via Docker network only. Infrastructure services exposed via port mappings.
-- **Kubernetes**: Services secured by default (ClusterIP) - only accessible within cluster, no external exposure. Infrastructure services use ClusterIP (not exposed).
-- See `docs/SECURITY_COMPARISON.md` for detailed comparison
-
-**Production Security Recommendations:**
-- **Remove infrastructure service port exposures** - Use network policies, firewalls, or VPN for admin access
-- **Implement mTLS (mutual TLS)** for inter-service communication:
-  - API Gateway ↔ Backend Services: mTLS for service-to-service authentication
-  - Prevents service impersonation and man-in-the-middle attacks
-  - Each service has its own certificate signed by a trusted CA
-  - Service mesh (Istio, Linkerd) can provide automatic mTLS
-- **Network Policies**: Restrict which pods can communicate with each other (Kubernetes only)
-- **Secrets Management**: Use Kubernetes Secrets or external secret managers (Vault) for credentials
-- **MinIO Security**: In production, consider:
-  - MinIO behind a reverse proxy with TLS termination
-  - IP allowlisting for presigned URL access
-  - Shorter presigned URL expiration times
-  - Audit logging for all storage access
-
-**Future Enhancements:**
-- Service mesh with automatic mTLS (Istio, Linkerd)
-- Certificate-based service authentication
-- Network segmentation with Kubernetes Network Policies
-- Encrypted inter-service communication
-- Zero-trust network architecture
-
 ### Data Consistency Strategies
 
 **Strong Consistency** (PostgreSQL)
@@ -1304,150 +1507,48 @@ Integration tests automatically verify event publishing. See `tests/test_integra
 
 **Current Limitations**
 
-- Single PostgreSQL instance (no replication)
 - Single MinIO instance (no distributed mode)
 - **Future Enhancements**: Read replicas, distributed MinIO, service mesh for inter-service communication
-
-## Service Communication Patterns
-
-### Current Implementation
-
-**API Gateway → Model Catalog**
-
-```
-Client → Gateway (JWT auth) → Catalog (with X-User-Id)
-```
-
-Example request flow:
-
-1. Client sends `POST /api/models` with `Authorization: Bearer <jwt>`
-2. Gateway validates JWT, extracts `user_id` from `sub` claim
-3. Gateway forwards to `http://model_catalog_service:8000/models`
-4. Gateway adds `X-User-Id: <user_id>` header
-5. Catalog creates model with `created_by = user_id`
-6. Catalog returns model JSON → Gateway → Client
-
-**API Gateway → Upload/Download Service (with RBAC)**
-
-```
-Client → Gateway (JWT auth) → Upload/Download (with X-User-Id)
-                                      ↓
-                              Authorization Check
-                                      ↓
-                              Model Catalog (permission check)
-                                      ↓
-                              Presigned URL Generation
-                                      ↓
-                              Client → MinIO (direct transfer)
-```
-
-Example download flow:
-
-1. Client requests `GET /api/downloads/{artifact_id}` (JWT optional - public downloads enabled)
-2. Gateway forwards to Upload/Download Service (with `X-User-Id` if authenticated, or anonymous)
-3. Upload/Download Service checks authorization:
-   - **Public downloads**: If no user_id, allow download (public access)
-   - **Authenticated users**: Queries database for upload session (artifact ownership)
-   - If artifact belongs to model, queries Model Catalog for model permissions
-   - Returns 403 if unauthorized (authenticated users only), 404 if not found
-4. If authorized, generates presigned URL
-5. Client downloads directly from MinIO (bypasses backend)
-
-### Asynchronous Communication (RabbitMQ)
-
-**Model Catalog → RabbitMQ → Event Consumers**
-
-```
-Model Catalog → Publish ModelCreated event
-                ↓
-         RabbitMQ Exchange (model_events)
-                ↓
-         Queue Bindings (model.created, model.deleted)
-                ↓
-         Consumers:
-         - Collaboration Service (cache model metadata, archive comments)
-         - Future: Notification Service (notify subscribers)
-         - Future: Audit Service (log model lifecycle)
-```
-
-**Implemented Events:**
-
-- `ModelCreated`: Published when new model is created (Model Catalog → RabbitMQ)
-- `ArtifactCommitted`: Published when artifact upload completes (Upload/Download Service → RabbitMQ)
-- `ModelDeleted`: Published when model is deleted (Model Catalog → RabbitMQ)
-- `TrainingJob`: Published when training job is triggered (Upload/Download Service → RabbitMQ → Training Service)
-- `ArtifactUploaded`: Published when artifact upload completes (Upload/Download Service → RabbitMQ)
-- `ArtifactDownloaded`: Published when artifact is downloaded (Upload/Download Service → RabbitMQ)
-
-**Example Flow (Model Creation):**
-
-1. Client creates model via Gateway → Catalog
-2. Catalog saves to PostgreSQL (ACID transaction)
-3. Catalog publishes `ModelCreated` event to RabbitMQ
-4. Event consumers receive notification asynchronously
-5. Response returned to client immediately (non-blocking)
-
-**Example Flow (Artifact Upload with Version Registration):**
-
-1. Client uploads artifact via Gateway → Upload/Download Service
-2. Upload/Download Service stores file in MinIO (content-addressed storage)
-3. Upload/Download Service saves metadata to PostgreSQL
-4. Upload/Download Service makes **synchronous HTTP call** to Model Catalog Service to register version (strong consistency, CP alignment)
-5. If Model Catalog is unavailable, upload fails (fail-closed to maintain consistency)
-6. Upload/Download Service publishes `ArtifactCommitted` event to RabbitMQ (notification only, best-effort)
-7. Response returned to client after version registration completes (synchronous)
-
-**Example Flow (Training Job):**
-
-1. Client uploads three artifacts: config JSON, dataset JSON, model weights .pth
-2. Client triggers training job via `POST /api/training-jobs` with artifact IDs
-3. Upload/Download Service validates artifacts exist and queries `model_id` from database
-4. Upload/Download Service publishes training job message to RabbitMQ `training_jobs` queue
-5. Training Service consumes message from queue
-6. Training Service downloads all three artifacts from Upload/Download Service (with user authorization)
-7. Training Service runs training using Agent class (PyTorch DQN)
-8. Training Service saves trained weights to temporary file
-9. Training Service uploads trained weights to MinIO via Upload/Download Service
-10. Upload/Download Service registers new model version with Model Catalog
-11. Trained model is available as new version of original model
 
 **Accessing Infrastructure Services for Debugging:**
 
 **Docker Compose:**
+
 - Infrastructure services (PostgreSQL, Redis, RabbitMQ, MongoDB) are **not exposed** to the host network for security
 - Use `docker compose exec` to access services:
+
   ```bash
   # PostgreSQL
   docker compose exec postgres_db psql -U rllabs -d model_catalog_db
-  
+
   # Redis
   docker compose exec redis_cache redis-cli
-  
+
   # RabbitMQ (CLI)
   docker compose exec rabbitmq_messaging rabbitmq-diagnostics status
   docker compose exec rabbitmq_messaging rabbitmqctl list_queues
-  
+
   # MongoDB
   docker compose exec mongo1 mongosh --port 27017
   ```
-
 - **MinIO** remains exposed at http://localhost:9000 (required for presigned URLs)
 
 **Kubernetes/Kind:**
+
 - Infrastructure services use ClusterIP (internal only)
 - **MinIO**: Uses ingress (`http://minio.localhost`) - no port-forward needed for presigned URLs
 - Use `kubectl port-forward` for temporary access to other infrastructure services:
   ```bash
   # PostgreSQL
   kubectl port-forward svc/postgres-primary 5432:5432
-  
+
   # Redis
   kubectl port-forward svc/redis 6379:6379
-  
+
   # RabbitMQ Management UI
   kubectl port-forward svc/rabbitmq 15672:15672
   # Then access: http://localhost:15672 (admin/admin_password)
-  
+
   # MongoDB
   kubectl port-forward svc/mongodb 27017:27017
   ```
@@ -1456,44 +1557,6 @@ Model Catalog → Publish ModelCreated event
   kubectl exec -it postgres-primary-0 -- psql -U rllabs -d model_catalog_db
   kubectl exec -it redis-master-0 -- redis-cli
   ```
-
-## Kubernetes Deployment
-
-See `kubernetes/` for production manifests. Deploy with:
-
-```bash
-kubectl apply -k kubernetes
-```
-
-Services include ConfigMaps, Secrets, Deployments, Services, and Ingress resources.
-
-### Observability Stack Deployment
-
-Deploy the full observability stack (Prometheus, Grafana, Jaeger, Loki, Alertmanager):
-
-```bash
-# Quick deploy
-./scripts/deploy_observability.sh
-
-# Rebuild services with OpenTelemetry tracing
-./scripts/rebuild_services_with_otel.sh
-```
-
-**Access the UIs:**
-
-| Service | Command | URL |
-|---------|---------|-----|
-| Grafana | `kubectl port-forward svc/grafana 3000:3000` | http://localhost:3000 (admin/admin) |
-| Jaeger | `kubectl port-forward svc/jaeger-query 16686:16686` | http://localhost:16686 |
-| Prometheus | `kubectl port-forward svc/prometheus 9090:9090` | http://localhost:9090 |
-| Alertmanager | `kubectl port-forward svc/alertmanager 9093:9093` | http://localhost:9093 |
-
-**The Debugging Journey:**
-1. **ALERT** fires → You know **WHAT** is wrong (Prometheus/Alertmanager)
-2. Find **TRACE** → You know **WHERE** the problem is (Jaeger)
-3. Query **LOGS** → You know **WHY** it failed (Loki via Grafana)
-
-See `OBSERVABILITY_GUIDE.md` for comprehensive documentation.
 
 ## Configuration
 
@@ -1575,11 +1638,8 @@ See `docker-compose.yml` for full configuration.
 
 ## Performance Optimization
 
-### Phase 5 Infrastructure Optimizations
-
-The system has been optimized through 5 phases of performance improvements:
-
 **PostgreSQL Configuration:**
+
 - `work_mem`: 16MB (prevents disk spills for complex queries)
 - `maintenance_work_mem`: 128MB (faster VACUUM/INDEX operations)
 - `shared_buffers`: 256MB (25% of memory, improved caching)
@@ -1588,44 +1648,14 @@ The system has been optimized through 5 phases of performance improvements:
 - `max_connections`: 300 (supports 3 pods × 75 connections each)
 
 **Redis Configuration:**
+
 - `maxmemory`: 100mb (master), 50mb (replicas) - prevents OOM kills
 - `maxmemory-policy`: allkeys-lru - evicts least recently used keys
 - `maxclients`: 10000 - explicit connection limit
 - High availability: Master + 2 replicas + 3 Sentinels
 
 **MinIO Configuration:**
+
 - CPU limits: 1000m (increased from 500m for erasure coding)
 - CPU requests: 200m (increased from 100m)
 - 4-node distributed deployment (erasure coding for redundancy)
-
-### Load Test Results
-
-**30 Users Test (After Phase 5 Optimizations):**
-- **Success Rate:** 93.16% (96%+ at 20 users)
-- **Throughput:** 65.20 req/s
-- **P95 Latency:** 1,963ms (at 50 users), ~180ms (at 20 users)
-- **P99 Latency:** 5,816ms (at 50 users), ~450ms (at 20 users)
-- **Cache Hit Rate:** 90.93% (application-level tracking)
-
-**20 Users Test (Baseline):**
-- **Success Rate:** 96.38%
-- **Throughput:** 147.52 req/s
-- **P95 Latency:** 220.47ms [OK]
-- **P99 Latency:** 561.16ms
-- **Mean:** 70.84ms
-- **Median:** 27.47ms
-
-**Performance Improvements:**
-- P95 latency: 20-30% improvement (220ms → 180ms at 20 users)
-- P99 latency: 20-40% improvement (561ms → 450ms at 20 users)
-- Cache hit rate: 90%+ with per-endpoint tracking
-- Connection pools: Optimized to prevent exhaustion
-
-### Monitoring Endpoints
-
-**Model Catalog Service:**
-- `GET /cache/stats` - Cache hit rate statistics per endpoint
-- `GET /database/pool-stats` - Connection pool usage (primary + replicas)
-- `GET /models/{model_id}/diagnostics` - Model-specific diagnostics
-
-See `OBSERVABILITY_GUIDE.md` and `OBSERVABILITY_REPORT.md` for detailed monitoring information.

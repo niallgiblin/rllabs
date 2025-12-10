@@ -176,12 +176,36 @@ echo "────────────────────────�
 echo "  Checking for ingress controller..."
 if kubectl get ingressclass nginx >/dev/null 2>&1; then
     echo "  Ingress controller already installed"
+    # Ensure it's scheduled on control-plane node (where port 80 is mapped)
+    echo "  Ensuring ingress controller runs on control-plane node..."
+    kubectl patch deployment -n ingress-nginx ingress-nginx-controller --type='json' -p='[{"op": "add", "path": "/spec/template/spec/nodeSelector", "value": {"ingress-ready": "true"}}]' 2>/dev/null || true
+    kubectl wait --namespace ingress-nginx --for=condition=ready pod --selector=app.kubernetes.io/component=controller --timeout=60s 2>/dev/null || true
 else
     echo "  Installing nginx ingress controller..."
     kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/kind/deploy.yaml 2>/dev/null || true
+    echo "  Configuring ingress controller to run on control-plane node..."
+    # Patch to ensure it runs on control-plane (where port 80 is mapped)
+    kubectl patch deployment -n ingress-nginx ingress-nginx-controller --type='json' -p='[{"op": "add", "path": "/spec/template/spec/nodeSelector", "value": {"ingress-ready": "true"}}]' 2>/dev/null || true
     echo "  Waiting for ingress controller to be ready..."
     kubectl wait --namespace ingress-nginx --for=condition=ready pod --selector=app.kubernetes.io/component=controller --timeout=120s 2>/dev/null || true
     echo "  Ingress controller installed"
+fi
+echo ""
+
+echo -e "${BLUE}STEP 0.7: Installing Metrics Server (Required for HPA)${NC}"
+echo "───────────────────────────────────────────────────────────────"
+echo "  Checking for metrics-server..."
+if kubectl get deployment metrics-server -n kube-system >/dev/null 2>&1; then
+    echo "  Metrics-server already installed"
+else
+    echo "  Installing metrics-server..."
+    kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml 2>/dev/null || true
+    echo "  Patching metrics-server for Kind compatibility (kubelet-insecure-tls)..."
+    kubectl patch deployment metrics-server -n kube-system --type='json' -p='[{"op": "add", "path": "/spec/template/spec/containers/0/args/-", "value": "--kubelet-insecure-tls"}]' 2>/dev/null || true
+    kubectl rollout restart deployment metrics-server -n kube-system 2>/dev/null || true
+    echo "  Waiting for metrics-server to be ready..."
+    kubectl wait --namespace kube-system --for=condition=ready pod --selector=k8s-app=metrics-server --timeout=120s 2>/dev/null || true
+    echo "  Metrics-server installed"
 fi
 echo ""
 
@@ -310,6 +334,9 @@ kubectl scale deployment api-gateway --replicas=2 2>/dev/null || true
 
 echo "  Applying Pod Disruption Budgets for high availability..."
 kubectl apply -f kubernetes/pod-disruption-budgets.yml 2>/dev/null || true
+
+echo "  Applying Horizontal Pod Autoscalers (HPA) for auto-scaling..."
+kubectl apply -f kubernetes/hpa.yml 2>/dev/null || true
 
 echo "  Application manifests applied and restarted"
 echo "  Waiting 90 seconds for applications to start..."

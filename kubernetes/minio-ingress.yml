@@ -11,7 +11,18 @@ metadata:
     nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
     nginx.ingress.kubernetes.io/proxy-connect-timeout: "60"
     nginx.ingress.kubernetes.io/proxy-buffering: "off"  
-    nginx.ingress.kubernetes.io/proxy-request-buffering: "off" 
+    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+    # Preserve the original Host header for presigned URL signature validation
+    # This is critical - presigned URLs are signed with the Host header, so it must match exactly
+    nginx.ingress.kubernetes.io/upstream-vhost: "minio.localhost"
+    # Enable CORS for browser uploads
+    nginx.ingress.kubernetes.io/enable-cors: "true"
+    nginx.ingress.kubernetes.io/cors-allow-origin: "*"
+    nginx.ingress.kubernetes.io/cors-allow-methods: "GET, PUT, POST, DELETE, HEAD, OPTIONS"
+    nginx.ingress.kubernetes.io/cors-allow-headers: "Content-Type, Content-Length, Authorization, X-Amz-*, x-amz-*, *"
+    nginx.ingress.kubernetes.io/cors-expose-headers: "ETag, etag"
+    nginx.ingress.kubernetes.io/cors-max-age: "3600"
+    nginx.ingress.kubernetes.io/cors-allow-credentials: "false"
 spec:
   ingressClassName: nginx
   rules:
