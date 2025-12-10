@@ -562,7 +562,7 @@ RLLabs is designed as a microservices architecture where specialised services ha
 - **Security**: Ingress provides proper Kubernetes networking, TLS termination, and routing
 - **Presigned URLs**: MinIO ingress enables direct client-to-storage transfers with proper authorization checks
 
-**Manual Testing:**
+## **Manual Testing:**
 
 - Both deployments support the same API endpoints through the API Gateway
 - All manual tests from the README work identically in both environments
