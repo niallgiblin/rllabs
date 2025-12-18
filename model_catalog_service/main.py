@@ -182,7 +182,7 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-MAX_CONCURRENT_READS = int(os.getenv("MAX_CONCURRENT_READS", "20")) 
+MAX_CONCURRENT_READS = int(os.getenv("MAX_CONCURRENT_READS", "100"))  # Increased from 20 to 100 for better throughput
 read_throttle_semaphore = asyncio.Semaphore(MAX_CONCURRENT_READS)
 
 try:

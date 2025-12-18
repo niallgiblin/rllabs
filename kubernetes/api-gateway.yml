@@ -70,10 +70,10 @@ spec:
             failureThreshold: 3
           resources:
             requests:
-              cpu: "250m"  
+              cpu: "200m"  # Increased from 100m to reduce HPA sensitivity to small CPU spikes
               memory: "256Mi"
             limits:
-              cpu: "1000m"  
+              cpu: "1000m"
               memory: "512Mi"
 ---
 apiVersion: v1

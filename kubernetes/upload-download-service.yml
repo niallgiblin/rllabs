@@ -90,10 +90,10 @@ spec:
             failureThreshold: 3
           resources:
             requests:
-              cpu: "250m"  
+              cpu: "150m"  # Reduced from 250m to make CPU utilization % higher with same load
               memory: "256Mi"
             limits:
-              cpu: "1000m"  
+              cpu: "1000m"
               memory: "512Mi"
 ---
 apiVersion: v1

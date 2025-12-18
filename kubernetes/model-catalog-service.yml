@@ -57,11 +57,11 @@ spec:
               value: "admin_password"
           resources:
             requests:
-              cpu: "500m"          
-              memory: "256Mi"     
+              cpu: "200m"  # Reduced from 500m to make CPU utilization % higher with same load
+              memory: "256Mi"
             limits:
-              cpu: "2000m"        
-              memory: "512Mi"     
+              cpu: "2000m"
+              memory: "512Mi"
           readinessProbe:
             httpGet:
               path: /health

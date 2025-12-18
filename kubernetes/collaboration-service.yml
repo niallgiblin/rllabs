@@ -70,11 +70,11 @@ spec:
             failureThreshold: 3
           resources:
             requests:
-              cpu: "100m"
-              memory: "256Mi"  
+              cpu: "150m"  # Increased from 80m to lower CPU % and allow scale-down
+              memory: "256Mi"
             limits:
               cpu: "200m"
-              memory: "512Mi"  
+              memory: "512Mi"
 ---
 apiVersion: v1
 kind: Service

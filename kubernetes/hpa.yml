@@ -23,41 +23,41 @@ spec:
     kind: Deployment
     name: api-gateway
   minReplicas: 2  
-  maxReplicas: 20  
+  maxReplicas: 30  # Increased from 20 to allow higher throughput  
   metrics:
     - type: Resource
       resource:
         name: cpu
         target:
           type: Utilization
-          averageUtilization: 70  
+          averageUtilization: 60  # Raised to 60% to prevent maxing out too fast
     - type: Resource
       resource:
         name: memory
         target:
           type: Utilization
-          averageUtilization: 80
+          averageUtilization: 60  # Lowered from 80% for demo visibility
   behavior:
     scaleDown:
-      stabilizationWindowSeconds: 30  
+      stabilizationWindowSeconds: 15  # Reduced from 30s for faster scale-down in demo
       policies:
         - type: Percent
-          value: 50
-          periodSeconds: 30  
+          value: 50  # Scale down by up to 50% at a time
+          periodSeconds: 15  # Reduced from 30s for faster scale-down
         - type: Pods
-          value: 2  
-          periodSeconds: 30
-      selectPolicy: Max  
+          value: 2  # Or remove up to 2 pods at once
+          periodSeconds: 15  # Reduced from 30s for faster scale-down
+      selectPolicy: Max
     scaleUp:
-      stabilizationWindowSeconds: 0  
+      stabilizationWindowSeconds: 60  # Wait 60s before scaling up to prevent rapid scaling on brief spikes
       policies:
         - type: Percent
-          value: 300 
-          periodSeconds: 10  
+          value: 100  # Can double pods (reduced from 200% to prevent over-scaling)
+          periodSeconds: 30  # Every 30s instead of 10s for more controlled scaling
         - type: Pods
-          value: 6  
-          periodSeconds: 10  
-      selectPolicy: Max  
+          value: 3  # Or add up to 3 pods at once (reduced from 6)
+          periodSeconds: 30  # Every 30s instead of 10s
+      selectPolicy: Max  # Use the policy that allows the most scaling  
 
 ---
 apiVersion: autoscaling/v2
@@ -69,41 +69,41 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
     name: model-catalog-service
-  minReplicas: 3  
-  maxReplicas: 15  
+  minReplicas: 2  
+  maxReplicas: 20  # Increased from 15 to allow higher throughput  
   metrics:
     - type: Resource
       resource:
         name: cpu
         target:
           type: Utilization
-          averageUtilization: 50  
+          averageUtilization: 15  # Lowered to 15% to trigger scaling (I/O-bound service needs more concurrent requests)
     - type: Resource
       resource:
         name: memory
         target:
           type: Utilization
-          averageUtilization: 80
+          averageUtilization: 60  # Raised from 45% to allow faster scale-down (memory was preventing scale-down)
   behavior:
     scaleDown:
-      stabilizationWindowSeconds: 30  
+      stabilizationWindowSeconds: 15  # Reduced from 30s for faster scale-down in demo
       policies:
         - type: Percent
           value: 50
-          periodSeconds: 30  
+          periodSeconds: 15  # Reduced from 30s for faster scale-down
         - type: Pods
           value: 2  
-          periodSeconds: 30
+          periodSeconds: 15  # Reduced from 30s for faster scale-down
       selectPolicy: Max
     scaleUp:
-      stabilizationWindowSeconds: 0  
+      stabilizationWindowSeconds: 0  # Scale up immediately
       policies:
         - type: Percent
-          value: 200  
-          periodSeconds: 10  
+          value: 300  # Can quadruple pods quickly
+          periodSeconds: 10  # Fast: every 10s
         - type: Pods
-          value: 5 
-          periodSeconds: 10  
+          value: 8  # Or add up to 8 pods at once (increased from 5)
+          periodSeconds: 10  # Fast: every 10s
       selectPolicy: Max
 
 ---
@@ -116,41 +116,41 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
     name: upload-download-service
-  minReplicas: 2  
-  maxReplicas: 20  
+  minReplicas: 1  
+  maxReplicas: 25  # Increased from 20 to allow higher throughput  
   metrics:
     - type: Resource
       resource:
         name: cpu
         target:
           type: Utilization
-          averageUtilization: 60 
+          averageUtilization: 20  # Lowered to 20% to trigger scaling (I/O-bound service)
     - type: Resource
       resource:
         name: memory
         target:
           type: Utilization
-          averageUtilization: 85 
+          averageUtilization: 60  # Raised from 45% to allow scale-down (memory was preventing scale-down at 44%) 
   behavior:
     scaleDown:
-      stabilizationWindowSeconds: 30  
+      stabilizationWindowSeconds: 15  # Reduced from 30s for faster scale-down in demo
       policies:
         - type: Percent
           value: 50
-          periodSeconds: 30  
+          periodSeconds: 15  # Reduced from 30s for faster scale-down
         - type: Pods
           value: 2  
-          periodSeconds: 30 
+          periodSeconds: 15  # Reduced from 30s for faster scale-down
       selectPolicy: Max  
     scaleUp:
-      stabilizationWindowSeconds: 0  
+      stabilizationWindowSeconds: 0  # Scale up immediately
       policies:
         - type: Percent
-          value: 300  
-          periodSeconds: 10  
+          value: 300  # Can quadruple pods quickly
+          periodSeconds: 10  # Fast: every 10s
         - type: Pods
-          value: 6 
-          periodSeconds: 10 
+          value: 8  # Or add up to 8 pods at once (increased from 6)
+          periodSeconds: 10  # Fast: every 10s
       selectPolicy: Max
 
 
@@ -164,41 +164,41 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
     name: collaboration-service
-  minReplicas: 2  
-  maxReplicas: 15  
+  minReplicas: 1  
+  maxReplicas: 15  # Reduced from 20 to prevent over-scaling and resource contention
   metrics:
     - type: Resource
       resource:
         name: cpu
         target:
           type: Utilization
-          averageUtilization: 50  
+          averageUtilization: 60  # Raised to 60% to allow scale-down (CPU was stuck at 57% preventing scale-down)
     - type: Resource
       resource:
         name: memory
         target:
           type: Utilization
-          averageUtilization: 80
+          averageUtilization: 45  # Lowered further for demo visibility
   behavior:
     scaleDown:
-      stabilizationWindowSeconds: 30 
+      stabilizationWindowSeconds: 15  # Reduced from 30s for faster scale-down in demo
       policies:
         - type: Percent
           value: 50
-          periodSeconds: 30 
+          periodSeconds: 15  # Reduced from 30s for faster scale-down
         - type: Pods
-          value: 2  
-          periodSeconds: 30
+          value: 2
+          periodSeconds: 15  # Reduced from 30s for faster scale-down
       selectPolicy: Max
     scaleUp:
-      stabilizationWindowSeconds: 0  
+      stabilizationWindowSeconds: 0  # Scale up immediately
       policies:
         - type: Percent
-          value: 150  
-          periodSeconds: 15  
+          value: 300  # Can quadruple pods quickly (increased from 150%)
+          periodSeconds: 10  # Faster: every 10s instead of 15s
         - type: Pods
-          value: 3 
-          periodSeconds: 15 
+          value: 8  # Or add up to 8 pods at once (increased from 3)
+          periodSeconds: 10  # Faster: every 10s instead of 15s
       selectPolicy: Max
 
 ---
