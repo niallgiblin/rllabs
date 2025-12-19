@@ -40,6 +40,8 @@ This script:
 - Starts port-forwards automatically
 - Verifies everything is ready
 
+**Manual Setup:** Create kind cluster, install metrics-server with `--kubelet-insecure-tls` flag, then apply Kubernetes manifests in order: infrastructure (`kubernetes/postgres-ha.yml`, `redis-ha.yml`, etc.), application services, observability stack (`kubernetes/prometheus.yml`, `grafana.yml`, etc.), and HPA (`kubernetes/hpa.yml`). Set up port-forwards for observability services (see "Manual port-forward" section below).
+
 ### Access Observability Services
 
 **Port-forwards are started automatically by the script. Access via:**
@@ -222,7 +224,9 @@ API Gateway (50ms total)
 - **Python 3.8+** - For load testing
 - **Kind cluster** - With ingress port mappings (ports 80/443 exposed)
 
-### Verify Prerequisites# Check kubectl
+### Verify Prerequisites
+
+### Check kubectl
 
 ```bash
 kubectl version --client

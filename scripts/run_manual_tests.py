@@ -17,7 +17,6 @@ import re
 from typing import Optional, Dict, Any
 import os
 
-API_GATEWAY_URL = "http://api.localhost"
 TIMEOUT = 10
 
 GREEN = '\033[0;32m'
@@ -35,6 +34,15 @@ class TestRunner:
         self.created_comment_id: Optional[str] = None
         self.training_artifact_ids: Dict[str, str] = {}  
         self.test_results = []
+        # Detect environment and set API Gateway URL accordingly
+        self.api_gateway_url = self._get_api_gateway_url()
+    
+    def _get_api_gateway_url(self) -> str:
+        """Determine the API Gateway URL based on the deployment environment"""
+        if self.is_docker_compose():
+            return "http://localhost:8080"
+        else:
+            return "http://api.localhost"
         
     def print_header(self, text: str):
         print(f"\n{BLUE}{'='*70}{NC}")
@@ -76,7 +84,7 @@ class TestRunner:
         self.print_header("Test 1: Health Checks")
         
         endpoints = [
-            ("API Gateway", f"{API_GATEWAY_URL}/health"),
+            ("API Gateway", f"{self.api_gateway_url}/health"),
         ]
         
         all_passed = True
@@ -169,7 +177,7 @@ class TestRunner:
         
         self.print_test("List all models (no auth)")
         try:
-            response = requests.get(f"{API_GATEWAY_URL}/api/models", timeout=TIMEOUT)
+            response = requests.get(f"{self.api_gateway_url}/api/models", timeout=TIMEOUT)
             if response.status_code == 200:
                 models = response.json()
                 self.print_pass(f"Found {len(models)} models")
@@ -184,7 +192,7 @@ class TestRunner:
             self.print_test(f"Get model details (ID: {self.created_model_id})")
             try:
                 response = requests.get(
-                    f"{API_GATEWAY_URL}/api/models/{self.created_model_id}",
+                    f"{self.api_gateway_url}/api/models/{self.created_model_id}",
                     timeout=TIMEOUT
                 )
                 if response.status_code == 200:
@@ -199,7 +207,7 @@ class TestRunner:
             self.print_test("Get model details (public, no auth)")
             try:
                 response = requests.get(
-                    f"{API_GATEWAY_URL}/api/models/{self.created_model_id}",
+                    f"{self.api_gateway_url}/api/models/{self.created_model_id}",
                     timeout=TIMEOUT
                 )
                 if response.status_code == 200:
@@ -220,7 +228,7 @@ class TestRunner:
         self.print_test("List model versions")
         try:
             response = requests.get(
-                f"{API_GATEWAY_URL}/api/models/{self.created_model_id}/versions",
+                f"{self.api_gateway_url}/api/models/{self.created_model_id}/versions",
                 timeout=TIMEOUT
             )
             if response.status_code == 200:
@@ -245,7 +253,7 @@ class TestRunner:
         self.print_test("Verify unauthenticated model creation is rejected")
         try:
             response = requests.post(
-                f"{API_GATEWAY_URL}/api/models",
+                f"{self.api_gateway_url}/api/models",
                 headers={"Content-Type": "application/json"},
                 json={
                     "name": "test-unauthorized-model",
@@ -269,7 +277,7 @@ class TestRunner:
                 "description": "Test model created by manual test runner"
             }
             response = requests.post(
-                f"{API_GATEWAY_URL}/api/models",
+                f"{self.api_gateway_url}/api/models",
                 headers={
                     "Authorization": f"Bearer {self.token}",
                     "Content-Type": "application/json"
@@ -318,7 +326,7 @@ class TestRunner:
                 "model_id": self.created_model_id
             }
             upload_response = requests.post(
-                f"{API_GATEWAY_URL}/api/uploads",
+                f"{self.api_gateway_url}/api/uploads",
                 headers={
                     "Authorization": f"Bearer {self.token}",
                     "Content-Type": "application/json"
@@ -375,7 +383,7 @@ class TestRunner:
                     "parts": [{"part_number": part_number, "etag": etag if etag else "test-etag"}]
                 }
                 complete_response = requests.post(
-                    f"{API_GATEWAY_URL}/api/uploads/{upload_id}/complete",
+                    f"{self.api_gateway_url}/api/uploads/{upload_id}/complete",
                     headers={
                         "Authorization": f"Bearer {self.token}",
                         "Content-Type": "application/json"
@@ -399,7 +407,7 @@ class TestRunner:
                     self.print_pass(f"File uploaded and automatically registered as version {registered_version}")
                     self.print_test("Verify version registration")
                     verify_response = requests.get(
-                        f"{API_GATEWAY_URL}/api/models/{self.created_model_id}/versions",
+                        f"{self.api_gateway_url}/api/models/{self.created_model_id}/versions",
                         headers={"Authorization": f"Bearer {self.token}"},
                         timeout=TIMEOUT
                     )
@@ -428,7 +436,7 @@ class TestRunner:
                 "content_hash": file_hash_with_prefix
             }
             response = requests.post(
-                f"{API_GATEWAY_URL}/api/models/{self.created_model_id}/versions",
+                f"{self.api_gateway_url}/api/models/{self.created_model_id}/versions",
                 headers={
                     "Authorization": f"Bearer {self.token}",
                     "Content-Type": "application/json"
@@ -463,7 +471,7 @@ class TestRunner:
         self.print_test("Query latest version (with auth)")
         try:
             response = requests.get(
-                f"{API_GATEWAY_URL}/api/models/{self.created_model_id}/latest",
+                f"{self.api_gateway_url}/api/models/{self.created_model_id}/latest",
                 headers={"Authorization": f"Bearer {self.token}"} if self.token else {},
                 timeout=TIMEOUT
             )
@@ -481,7 +489,7 @@ class TestRunner:
         self.print_test("Query latest version (no auth - public)")
         try:
             response = requests.get(
-                f"{API_GATEWAY_URL}/api/models/{self.created_model_id}/latest",
+                f"{self.api_gateway_url}/api/models/{self.created_model_id}/latest",
                 timeout=TIMEOUT
             )
             
@@ -524,7 +532,7 @@ class TestRunner:
                 "model_id": self.created_model_id
             }
             response = requests.post(
-                f"{API_GATEWAY_URL}/api/uploads",
+                f"{self.api_gateway_url}/api/uploads",
                 headers={
                     "Authorization": f"Bearer {self.token}",
                     "Content-Type": "application/json"
@@ -607,7 +615,7 @@ class TestRunner:
                                     ]
                                 }
                                 complete_response = requests.post(
-                                    f"{API_GATEWAY_URL}/api/uploads/{upload_id}/complete",
+                                    f"{self.api_gateway_url}/api/uploads/{upload_id}/complete",
                                     headers={
                                         "Authorization": f"Bearer {self.token}",
                                         "Content-Type": "application/json"
@@ -660,7 +668,7 @@ class TestRunner:
         self.print_test("Public download (no auth)")
         try:
             response = requests.get(
-                f"{API_GATEWAY_URL}/api/downloads/{self.created_artifact_id}",
+                f"{self.api_gateway_url}/api/downloads/{self.created_artifact_id}",
                 params={"expires_in": 3600},
                 timeout=TIMEOUT
             )
@@ -724,7 +732,7 @@ class TestRunner:
                 "description": "Model to be deleted"
             }
             response = requests.post(
-                f"{API_GATEWAY_URL}/api/models",
+                f"{self.api_gateway_url}/api/models",
                 headers={
                     "Authorization": f"Bearer {self.token}",
                     "Content-Type": "application/json"
@@ -739,7 +747,7 @@ class TestRunner:
                 
                 self.print_test("Delete model (owner)")
                 delete_response = requests.delete(
-                    f"{API_GATEWAY_URL}/api/models/{delete_model_id}",
+                    f"{self.api_gateway_url}/api/models/{delete_model_id}",
                     headers={"Authorization": f"Bearer {self.token}"},
                     timeout=TIMEOUT
                 )
@@ -778,7 +786,7 @@ class TestRunner:
                 "parentId": None
             }
             response = requests.post(
-                f"{API_GATEWAY_URL}/api/models/{self.created_model_id}/comments",
+                f"{self.api_gateway_url}/api/models/{self.created_model_id}/comments",
                 headers={
                     "Authorization": f"Bearer {self.token}",
                     "Content-Type": "application/json"
@@ -794,7 +802,7 @@ class TestRunner:
                 
                 self.print_test("Get comments for model")
                 get_response = requests.get(
-                    f"{API_GATEWAY_URL}/api/models/{self.created_model_id}/comments",
+                    f"{self.api_gateway_url}/api/models/{self.created_model_id}/comments",
                     params={"page": 1, "limit": 50},
                     timeout=TIMEOUT
                 )
@@ -813,7 +821,7 @@ class TestRunner:
                             "parentId": comment_id
                         }
                         reply_response = requests.post(
-                            f"{API_GATEWAY_URL}/api/models/{self.created_model_id}/comments",
+                            f"{self.api_gateway_url}/api/models/{self.created_model_id}/comments",
                             headers={
                                 "Authorization": f"Bearer {self.token}",
                                 "Content-Type": "application/json"
@@ -830,7 +838,7 @@ class TestRunner:
                                 "content": "Updated comment content from test runner"
                             }
                             update_response = requests.put(
-                                f"{API_GATEWAY_URL}/api/comments/{comment_id}",
+                                f"{self.api_gateway_url}/api/comments/{comment_id}",
                                 headers={
                                     "Authorization": f"Bearer {self.token}",
                                     "Content-Type": "application/json"
@@ -844,7 +852,7 @@ class TestRunner:
                                 
                                 self.print_test("Delete comment")
                                 delete_response = requests.delete(
-                                    f"{API_GATEWAY_URL}/api/comments/{comment_id}",
+                                    f"{self.api_gateway_url}/api/comments/{comment_id}",
                                     headers={"Authorization": f"Bearer {self.token}"},
                                     timeout=TIMEOUT
                                 )
@@ -888,7 +896,7 @@ class TestRunner:
         self.print_test("Delete artifact (admin)")
         try:
             response = requests.delete(
-                f"{API_GATEWAY_URL}/api/artifacts/{self.created_artifact_id}",
+                f"{self.api_gateway_url}/api/artifacts/{self.created_artifact_id}",
                 headers={"Authorization": f"Bearer {self.admin_token}"},
                 timeout=TIMEOUT
             )
@@ -1033,7 +1041,7 @@ class TestRunner:
             config_hash = hashlib.sha256(config_content).hexdigest()
             
             upload_response = requests.post(
-                f"{API_GATEWAY_URL}/api/uploads",
+                f"{self.api_gateway_url}/api/uploads",
                 headers={
                     "Authorization": f"Bearer {self.token}",
                     "Content-Type": "application/json"
@@ -1082,7 +1090,7 @@ class TestRunner:
             
             etag = upload_part_response.headers.get("ETag", "").strip('"')
             complete_response = requests.post(
-                f"{API_GATEWAY_URL}/api/uploads/{upload_id}/complete",
+                f"{self.api_gateway_url}/api/uploads/{upload_id}/complete",
                 headers={
                     "Authorization": f"Bearer {self.token}",
                     "Content-Type": "application/json"
@@ -1114,7 +1122,7 @@ class TestRunner:
             dataset_hash = hashlib.sha256(dataset_content).hexdigest()
             
             upload_response = requests.post(
-                f"{API_GATEWAY_URL}/api/uploads",
+                f"{self.api_gateway_url}/api/uploads",
                 headers={
                     "Authorization": f"Bearer {self.token}",
                     "Content-Type": "application/json"
@@ -1159,7 +1167,7 @@ class TestRunner:
             
             etag = upload_part_response.headers.get("ETag", "").strip('"')
             complete_response = requests.post(
-                f"{API_GATEWAY_URL}/api/uploads/{upload_id}/complete",
+                f"{self.api_gateway_url}/api/uploads/{upload_id}/complete",
                 headers={
                     "Authorization": f"Bearer {self.token}",
                     "Content-Type": "application/json"
@@ -1196,7 +1204,7 @@ class TestRunner:
                 model_hash = hashlib.sha256(model_content).hexdigest()
                 
                 upload_response = requests.post(
-                    f"{API_GATEWAY_URL}/api/uploads",
+                    f"{self.api_gateway_url}/api/uploads",
                     headers={
                         "Authorization": f"Bearer {self.token}",
                         "Content-Type": "application/json"
@@ -1241,7 +1249,7 @@ class TestRunner:
                 
                 etag = upload_part_response.headers.get("ETag", "").strip('"')
                 complete_response = requests.post(
-                    f"{API_GATEWAY_URL}/api/uploads/{upload_id}/complete",
+                    f"{self.api_gateway_url}/api/uploads/{upload_id}/complete",
                     headers={
                         "Authorization": f"Bearer {self.token}",
                         "Content-Type": "application/json"
@@ -1270,7 +1278,7 @@ class TestRunner:
         self.print_test("Trigger training job")
         try:
             job_response = requests.post(
-                f"{API_GATEWAY_URL}/api/training-jobs",
+                f"{self.api_gateway_url}/api/training-jobs",
                 headers={
                     "Authorization": f"Bearer {self.token}",
                     "Content-Type": "application/json"
@@ -1373,23 +1381,31 @@ class TestRunner:
         print(f"{GREEN}  RLLabs Manual Test Runner ({env_name}){NC}")
         print(f"{GREEN}{'='*70}{NC}\n")
         
-        print(f"API Gateway URL: {API_GATEWAY_URL}")
+        print(f"API Gateway URL: {self.api_gateway_url}")
         print(f"Testing against {env_name} deployment\n")
         
         print("Checking API Gateway connectivity...")
         try:
-            response = requests.get(f"{API_GATEWAY_URL}/health", timeout=5)
+            response = requests.get(f"{self.api_gateway_url}/health", timeout=5)
             if response.status_code == 200:
                 print(f"{GREEN}✓ API Gateway is accessible{NC}\n")
             else:
                 print(f"{RED}✗ API Gateway returned status {response.status_code}{NC}\n")
-                print(f"{YELLOW}Make sure ingress is configured: kubectl get ingress api-gateway-ingress{NC}\n")
-                print(f"{YELLOW}Or use port-forward for local dev: kubectl port-forward svc/api-gateway 8080:8080{NC}\n")
+                if is_compose:
+                    print(f"{YELLOW}Make sure Docker Compose services are running: docker compose up{NC}\n")
+                    print(f"{YELLOW}API Gateway should be accessible at: http://localhost:8080{NC}\n")
+                else:
+                    print(f"{YELLOW}Make sure ingress is configured: kubectl get ingress api-gateway-ingress{NC}\n")
+                    print(f"{YELLOW}Or use port-forward for local dev: kubectl port-forward svc/api-gateway 8080:8080{NC}\n")
                 return False
         except Exception as e:
             print(f"{RED}✗ Cannot connect to API Gateway: {str(e)}{NC}\n")
-            print(f"{YELLOW}Make sure ingress is configured: kubectl get ingress api-gateway-ingress{NC}\n")
-            print(f"{YELLOW}Access via: http://api.localhost (or use port-forward: kubectl port-forward svc/api-gateway 8080:8080){NC}\n")
+            if is_compose:
+                print(f"{YELLOW}Make sure Docker Compose services are running: docker compose up{NC}\n")
+                print(f"{YELLOW}API Gateway should be accessible at: http://localhost:8080{NC}\n")
+            else:
+                print(f"{YELLOW}Make sure ingress is configured: kubectl get ingress api-gateway-ingress{NC}\n")
+                print(f"{YELLOW}Access via: http://api.localhost (or use port-forward: kubectl port-forward svc/api-gateway 8080:8080){NC}\n")
             return False
         
         tests = [

@@ -284,7 +284,7 @@ graph TB
 - **Python 3.9+** (for running tests and token generation)
 - **Node.js** v18+ and **npm** (for frontend development)
 
-**Optional (for Kubernetes deployment):**
+**Optional (for scalable Kubernetes deployment):**
 
 - **kubectl** (Kubernetes CLI)
 - **Kind** (local Kubernetes cluster)
@@ -331,7 +331,9 @@ docker compose logs -f
 
 For Kubernetes deployment with full observability stack:
 
-NOTE: see [OBSERVABILITY.md](OBSERVABILITY.md) for detailed guide on Kubernetes, scalability and metric observability.
+NOTE: THIS MAY REQUIRE EXTENDING BASELINE DOCKER RESOURCE ALLOCATIONS AND CAN TAKE OVER 15 MINUTES TO FULLY WARM UP. For much quicker setup use `docker compose up --build` for indentical functionality without actual scaling.
+
+See [OBSERVABILITY.md](OBSERVABILITY.md) for detailed guide on Kubernetes, scalability and metric observability.
 
 ```bash
 # One-command setup (deploys everything)
@@ -360,11 +362,11 @@ Services include ConfigMaps, Secrets, Deployments, Services, Ingress resources, 
 | Prometheus   | `kubectl port-forward svc/prometheus 9090:9090`     | http://localhost:9090               |
 | Alertmanager | `kubectl port-forward svc/alertmanager 9093:9093`   | http://localhost:9093               |
 
-**The Debugging Journey:**
+**Debugging:**
 
-1. **ALERT** fires → **WHAT** is wrong (Prometheus/Alertmanager)
-2. Find **TRACE** → **WHERE** the problem is (Jaeger)
-3. Query **LOGS** → **WHY** it failed (Loki via Grafana)
+1. **ALERT**  → **WHAT** is wrong (Prometheus/Alertmanager)
+2. **TRACE** → **WHERE** the problem is (Jaeger)
+3. **LOGS** → **WHY** it failed (Loki via Grafana)
 
 ### Monitoring Endpoints
 
@@ -386,6 +388,9 @@ pip install -r tests/requirements.txt
 
 ```bash
 pytest tests/ -v
+
+# Or if looking for a quick 20-second test for major functionality run:
+python scripts/run_manual_tests.py
 ```
 
 Stop and Cleanup
@@ -408,7 +413,7 @@ RLLabs is designed as a microservices architecture where specialised services ha
 
 **Frontend (Vue.js)**
 
-- Modern Vue 3 + Tailwind CSS v4 interface
+- Vue 3 + Tailwind CSS
 - Interactive Model Catalog and Collaboration UI
 - Runs on http://localhost:5173 (dev)
 
@@ -571,7 +576,7 @@ RLLabs is designed as a microservices architecture where specialised services ha
 
 - Both deployments support the same API endpoints through the API Gateway
 - All manual tests from the README work identically in both environments
-- Use `python3 scripts/run_manual_tests.py` to verify functionality in either environment
+- Use `python scripts/run_manual_tests.py` to verify functionality in either environment
 - The script automatically detects Docker Compose or Kubernetes and runs appropriate checks
 - **All 14 tests passing**: Health checks, JWT tokens, model CRUD, uploads/downloads, training service, RabbitMQ connectivity, and more
 
@@ -974,7 +979,7 @@ curl -X DELETE http://localhost:8080/api/artifacts/{artifact_id} \
 - Returns `404 Not Found` if artifact doesn't exist
 - Returns `204 No Content` on success
 
-**Note**: This is a hard delete - the artifact will be permanently removed from MinIO storage.
+**NOTE**: This is a hard delete - the artifact will be permanently removed from MinIO storage.
 
 ### Training Artifacts
 
@@ -1284,7 +1289,7 @@ curl http://localhost:8080/api/models/1/latest
 
 All GET `/api/models*` endpoints are public (no authentication required). This enables easy model discovery and browsing.
 
-**Note**: Write operations (POST/PUT/DELETE) still require authentication.
+**NOTE**: Write operations (POST/PUT/DELETE) still require authentication.
 
 ### Testing RabbitMQ Events
 
@@ -1640,27 +1645,3 @@ Integration tests automatically verify event publishing. See `tests/test_integra
 - `MINIO_ROOT_PASSWORD`: Admin password
 
 See `docker-compose.yml` for full configuration.
-
-## Performance Optimization
-
-**PostgreSQL Configuration:**
-
-- `work_mem`: 16MB (prevents disk spills for complex queries)
-- `maintenance_work_mem`: 128MB (faster VACUUM/INDEX operations)
-- `shared_buffers`: 256MB (25% of memory, improved caching)
-- `effective_cache_size`: 768MB (75% of memory, better query planning)
-- Read replicas configured with same performance parameters
-- `max_connections`: 300 (supports 3 pods × 75 connections each)
-
-**Redis Configuration:**
-
-- `maxmemory`: 100mb (master), 50mb (replicas) - prevents OOM kills
-- `maxmemory-policy`: allkeys-lru - evicts least recently used keys
-- `maxclients`: 10000 - explicit connection limit
-- High availability: Master + 2 replicas + 3 Sentinels
-
-**MinIO Configuration:**
-
-- CPU limits: 1000m (increased from 500m for erasure coding)
-- CPU requests: 200m (increased from 100m)
-- 4-node distributed deployment (erasure coding for redundancy)
