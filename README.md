@@ -1645,3 +1645,5 @@ Integration tests automatically verify event publishing. See `tests/test_integra
 - `MINIO_ROOT_PASSWORD`: Admin password
 
 See `docker-compose.yml` for full configuration.
+
+-- End
